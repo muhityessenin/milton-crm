@@ -47,6 +47,11 @@ services:
 
   app:
     <<: *app
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     expose: ["4173"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
@@ -78,10 +83,9 @@ services:
 
   migrate:
     <<: *app
-    profiles: ["tools"]
     restart: "no"
     entrypoint: ["/sbin/tini", "--"]
-    command: ["node", "scripts/migrate-postgres.js"]
+    command: ["sh", "-c", "node scripts/migrate-postgres.js && node scripts/bootstrap-postgres.js"]
 
 volumes:
   postgres_data:

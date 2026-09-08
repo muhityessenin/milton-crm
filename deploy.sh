@@ -28,23 +28,8 @@ git fetch origin "$DEPLOY_BRANCH"
 git pull --ff-only origin "$DEPLOY_BRANCH"
 
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
-echo "Building application image"
-"${compose[@]}" build app migrate
-
-echo "Starting PostgreSQL"
-"${compose[@]}" up -d db
-
-echo "Applying pending database migrations"
-"${compose[@]}" run --rm migrate
-
-echo "Bootstrapping an empty database"
-"${compose[@]}" run --rm migrate node scripts/bootstrap-postgres.js
-
-echo "Starting Milton CRM"
-"${compose[@]}" up -d --remove-orphans app
-if [[ "$COMPOSE_FILE" == "compose.caddy.yaml" ]]; then
-  "${compose[@]}" up -d --remove-orphans caddy
-fi
+echo "Rebuilding and recreating Milton CRM"
+"${compose[@]}" up -d --build --force-recreate --remove-orphans
 
 container_id="$("${compose[@]}" ps -q app)"
 for attempt in {1..30}; do

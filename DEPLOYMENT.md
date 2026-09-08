@@ -31,12 +31,18 @@ and run:
 ```
 
 For production, point the domain's A/AAAA record to the server, allow TCP 80/443
-and UDP 443, keep PostgreSQL port 5432 closed, set `DOMAIN=crm.example.com` in
-`.env.production`, and run:
+and UDP 443, keep PostgreSQL port 5432 closed, and set
+`DOMAIN=crm.example.com` in `.env.production`. A manual deployment is then:
 
 ```bash
-ENABLE_CADDY=true ./deploy.sh
+git pull --ff-only origin main
+docker compose --env-file .env.production -f compose.caddy.yaml up -d --build --force-recreate --remove-orphans
 ```
+
+The `migrate` one-shot service is part of the normal Compose dependency graph.
+It waits for PostgreSQL, applies pending migrations, and bootstraps only an empty
+database. The app starts only after that service succeeds. Therefore the two
+commands above are sufficient; do not run migrations separately.
 
 ## 2. Connect GitHub to the server
 
@@ -62,11 +68,12 @@ and configure it for the deploy user. Do not reuse the server-login private key.
 
 1. Refuses to overwrite uncommitted server-side changes.
 2. Fetches and fast-forwards from `origin/main`.
-3. Builds the pinned application dependencies in Docker.
-4. Starts PostgreSQL and waits until `pg_isready` reports it healthy.
-5. Applies only pending SQL migrations under an advisory migration lock.
-6. Creates the initial Owner and reference data only when `users` is empty.
-7. Recreates the app container and waits for `/api/health` to become healthy.
+3. Rebuilds and force-recreates the complete Compose stack.
+4. Waits until PostgreSQL reports healthy.
+5. Runs the one-shot `migrate` service to apply migrations and bootstrap only an
+   empty database.
+6. Starts the app only after database preparation succeeds.
+7. Waits for `/api/health` to become healthy.
 
 The app container runs as a non-root user with a read-only filesystem. Client
 data is stored in the named `postgres_data` volume, not in the app image.

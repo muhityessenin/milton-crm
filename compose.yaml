@@ -70,6 +70,11 @@ services:
 
   app:
     <<: *app
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${APP_BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-4173}:4173"
     healthcheck:
@@ -84,10 +89,9 @@ services:
 
   migrate:
     <<: *app
-    profiles: ["tools"]
     restart: "no"
     entrypoint: ["/sbin/tini", "--"]
-    command: ["node", "scripts/migrate-postgres.js"]
+    command: ["sh", "-c", "node scripts/migrate-postgres.js && node scripts/bootstrap-postgres.js"]
 
 volumes:
   postgres_data:
