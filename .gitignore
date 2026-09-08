@@ -1,0 +1,28 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Dependencies and local package-manager cache
+node_modules/
+backups/
+.pnpm-store/
+.git-history-backup-*/
+
+# Local CRM database and temporary storage (may contain client data)
+data/db.json
+data/*.tmp
+
+# Logs, coverage, and build output
+*.log
+coverage/
+dist/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
