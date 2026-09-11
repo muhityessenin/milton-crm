@@ -10,6 +10,7 @@ These migrations support the PostgreSQL HTTP backend. They do not import
 3. `003_preserve_trial_completion_behavior.sql` keeps the existing API rule that a paid/resulted trial may be closed before its scheduled time.
 4. `004_concurrency_and_idempotency.sql` adds optimistic row versions and payment idempotency protection.
 5. `005_realtime_trial_receipts_and_schedule.sql` adds trial-payment metadata, persistent receipt references, historical occupied slots, and commit-safe PostgreSQL change notifications.
+6. `006_unassigned_trials.sql` adds an explicit unassigned trial state, preferred-time fields, assignment concurrency versioning, reminder configuration, and assignment permissions without adding a CRM status.
 6. `tests/verify_schema.sql` validates the catalog and exercises critical constraints inside a transaction that is always rolled back.
 
 ## Application requirements for the future cutover

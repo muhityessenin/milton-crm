@@ -62,10 +62,10 @@ class PostgresStorage {
   async assertSchema() {
     const result = await this.db.query(`
       SELECT version FROM public.schema_migrations
-      WHERE version IN ('001', '002', '003', '004', '005') ORDER BY version
+      WHERE version IN ('001', '002', '003', '004', '005', '006') ORDER BY version
     `);
-    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005") {
-      throw new Error("Milton PostgreSQL migrations 001 through 005 are required");
+    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006") {
+      throw new Error("Milton PostgreSQL migrations 001 through 006 are required");
     }
   }
 
@@ -190,8 +190,18 @@ class PostgresStorage {
       FROM candidates WHERE type IS NOT NULL
       ON CONFLICT (user_id,type,trial_id) WHERE trial_id IS NOT NULL DO NOTHING
     `, [userId]);
-    if (result.rowCount) this.invalidateStateCache();
-    return result.rowCount;
+    const unassigned=await this.db.query(`
+      INSERT INTO notifications(id,user_id,client_id,trial_id,type,content)
+      SELECT 'notif_'||substr(replace(gen_random_uuid()::text,'-',''),1,8),$1,t.client_id,t.id,'UNASSIGNED_TRIAL_OVERDUE',c.name||' · пробный ожидает назначения'
+      FROM trials t JOIN clients c ON c.id=t.client_id CROSS JOIN app_settings s JOIN users viewer ON viewer.id=$1
+      WHERE t.active AND t.assignment_state='UNASSIGNED' AND c.archived_at IS NULL
+        AND s.unassigned_trial_reminder_minutes>0
+        AND now()>=t.created_at+make_interval(mins=>s.unassigned_trial_reminder_minutes)
+        AND (t.manager_id=$1 OR viewer.business_role='ADMIN')
+      ON CONFLICT(user_id,type,trial_id) WHERE trial_id IS NOT NULL DO NOTHING
+    `,[userId]);
+    if(result.rowCount||unassigned.rowCount)this.invalidateStateCache();
+    return result.rowCount+unassigned.rowCount;
   }
 
   async registerClientAndBookTrial(input) {
@@ -243,6 +253,15 @@ class PostgresStorage {
       await tx.history.append({ id: input.trialHistoryId || id("hist"), clientId: client.id, actorUserId: input.actorUserId, eventType: "TRIAL_SCHEDULED", oldValue: null, newValue: { scheduledAt: trial.scheduledAt, closerId: trial.closerId }, createdAt });
       await tx.notifications.create({ id: input.notificationId || id("notif"), userId: input.closerId, clientId: client.id, trialId: trial.id, type: "TRIAL_ASSIGNED", content: `${client.name} · ${trial.scheduledAt}`, createdAt });
       return { client, trial };
+    });
+  }
+
+  async registerClientUnassignedTrial(input){
+    return this.transaction(async(tx)=>{
+      const duplicate=await tx.clients.findByNormalizedPhone(input.normalizedPhone);if(duplicate)throw Object.assign(new Error(duplicate.archivedAt?"Клиент с таким номером находится в архиве":"Клиент с таким номером телефона уже существует"),{code:"DUPLICATE_PHONE",clientId:duplicate.id});
+      const createdAt=input.createdAt||now();const client=await tx.clients.create({id:input.clientId||id("cl"),name:input.name,normalizedPhone:input.normalizedPhone,originalPhone:input.originalPhone,originalManagerId:input.managerId,currentManagerId:input.managerId,currentCloserId:null,currentStatusId:input.statusId,leadSourceId:input.leadSourceId||null,registrationComment:input.registrationComment||"",tagIds:input.tagIds||[],createdAt,updatedAt:createdAt});
+      const trial=await tx.trials.create({id:input.trialId||id("trial"),clientId:client.id,managerId:input.managerId,closerId:null,slotId:null,scheduledAt:null,statusAtBookingId:input.statusId,active:true,createdAt,assignmentState:"UNASSIGNED",preferredTimeText:input.preferredTimeText||null,preferredDate:input.preferredDate||null,preferredStartTime:input.preferredStartTime||null,preferredEndTime:input.preferredEndTime||null,trialType:input.trialType||"FREE",trialAmount:input.trialAmount||0,trialPaymentDate:input.trialPaymentDate||null,registeredByUserId:input.registeredByUserId||input.actorUserId,receiptStorageKey:input.receiptStorageKey||null,receiptOriginalName:input.receiptOriginalName||null,receiptMimeType:input.receiptMimeType||null,receiptSizeBytes:input.receiptSizeBytes||null,receiptUploadedAt:input.receiptUploadedAt||null});
+      await tx.history.append({id:id("hist"),clientId:client.id,actorUserId:input.actorUserId,eventType:"CLIENT_CREATED",oldValue:null,newValue:{name:client.name,phone:client.normalizedPhone},createdAt});await tx.history.append({id:id("hist"),clientId:client.id,actorUserId:input.actorUserId,eventType:"TRIAL_REGISTERED_UNASSIGNED",oldValue:null,newValue:{preferredTimeText:trial.preferredTimeText},createdAt});await tx.auditLogs.append({id:id("audit"),actorUserId:input.actorUserId,entityType:"TRIAL",entityId:trial.id,action:"TRIAL_REGISTERED_UNASSIGNED",oldValue:null,newValue:{clientId:client.id,preferredTimeText:trial.preferredTimeText},createdAt});return{client,trial};
     });
   }
 

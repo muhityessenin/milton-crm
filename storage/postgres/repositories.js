@@ -227,9 +227,11 @@ class TrialsRepository extends SqlRepository {
         attendance_outcome, archive_interrupted_at, active, created_at,
         trial_type, trial_amount, trial_payment_date, registered_by_user_id,
         receipt_storage_key, receipt_original_name, receipt_mime_type,
-        receipt_size_bytes, receipt_uploaded_at
+        receipt_size_bytes, receipt_uploaded_at, assignment_state, preferred_time_text,
+        preferred_date, preferred_start_time, preferred_end_time, assigned_at,
+        assigned_by_user_id, assignment_version
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,now()),
-        $16,$17,$18,$19,$20,$21,$22,$23,$24)
+        $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
       RETURNING *
     `, [
       value.id, value.clientId, value.managerId, value.closerId, value.slotId,
@@ -241,6 +243,9 @@ class TrialsRepository extends SqlRepository {
       value.registeredByUserId || value.managerId, value.receiptStorageKey || null,
       value.receiptOriginalName || null, value.receiptMimeType || null,
       value.receiptSizeBytes || null, value.receiptUploadedAt || null,
+      value.assignmentState || "SCHEDULED", value.preferredTimeText || null,
+      value.preferredDate || null, value.preferredStartTime || null, value.preferredEndTime || null,
+      value.assignedAt || null, value.assignedByUserId || null, Number(value.assignmentVersion || 1),
     ]);
     return camelRow(result.rows[0]);
   }

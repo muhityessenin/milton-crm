@@ -29,6 +29,7 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
     const type = response.headers.get("content-type") || "";
     return { response, body: type.includes("application/json") ? await response.json() : await response.text() };
   }
+  const dayFrom=(value)=>new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Almaty"}).format(new Date(value));
 
   let result = await call("GET", "/api/health");
   assert.equal(result.response.status, 200);
@@ -50,6 +51,10 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
 
   result = await call("POST", "/api/clients", { name:"Invalid paid",phone:"+77015554431",managerId:"usr_manager",closerId:"usr_closer",slotId:slot.id,statusId:"st_scheduled",trialType:"PAID",trialAmount:1500 });
   assert.equal(result.response.status,422);assert.match(result.body.error,/чек/);
+
+  result=await call("POST","/api/clients",{name:"Unassigned Client",phone:"+77015554001",managerId:"usr_manager",statusId:"st_scheduled",assignmentMode:"LATER",preferredTimeText:"После 20:00",trialType:"FREE"});assert.equal(result.response.status,201);const unassignedClientId=result.body.id,unassignedTrial=result.body.activeTrial;assert.equal(unassignedTrial.assignmentState,"UNASSIGNED");assert.equal(unassignedTrial.closerId,null);assert.equal(unassignedTrial.slotId,null);assert.equal(unassignedTrial.scheduledAt,null);
+  result=await call("GET","/api/unassigned-trials");assert.equal(result.response.status,200);assert.equal(result.body.items.some(t=>t.id===unassignedTrial.id&&t.preferredTimeText==="После 20:00"),true);assert.equal((await call("GET",`/api/schedule-board?date=${slotDate}`)).body.slots.some(s=>s.bookedTrialId===unassignedTrial.id),false);
+  const assignSlot=(await call("GET","/api/slots?closerId=usr_closer")).body.find(item=>item.status==="FREE");const assignmentRace=await Promise.all([call("POST",`/api/trials/${unassignedTrial.id}/assign`,{slotId:assignSlot.id,version:unassignedTrial.assignmentVersion}),call("POST",`/api/trials/${unassignedTrial.id}/assign`,{slotId:assignSlot.id,version:unassignedTrial.assignmentVersion})]);assert.deepEqual(assignmentRace.map(x=>x.response.status).sort(),[200,409]);result=await call("GET",`/api/clients/${unassignedClientId}`);assert.equal(result.body.client.activeTrial.assignmentState,"SCHEDULED");assert.equal(result.body.client.originalManagerId,"usr_manager");assert.ok(result.body.history.some(h=>h.eventType==="TRIAL_ASSIGNED"));assert.equal((await call("GET","/api/unassigned-trials")).body.items.some(t=>t.id===unassignedTrial.id),false);assert.equal((await call("GET",`/api/schedule-board?date=${dayFrom(assignSlot.startAt)}`)).body.slots.find(s=>s.id===assignSlot.id).bookedTrialId,unassignedTrial.id);assert.equal((await call("DELETE",`/api/clients/${unassignedClientId}`,{confirmation:"УДАЛИТЬ"})).response.status,200);
 
   result = await call("POST", "/api/clients", {
     name:"API JSON Client", phone:"+7 701 555 44 33", managerId:"usr_manager",

@@ -30,8 +30,9 @@ BEGIN
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '002')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '003')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '004')
-    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '005') THEN
-    RAISE EXCEPTION 'Expected schema migration versions 001 through 005';
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '005')
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '006') THEN
+    RAISE EXCEPTION 'Expected schema migration versions 001 through 006';
   END IF;
 END;
 $$;

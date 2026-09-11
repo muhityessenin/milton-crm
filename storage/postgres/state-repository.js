@@ -59,7 +59,7 @@ class PostgresStateRepository {
     const statuses=mapped(raw.statuses),leadSources=mapped(raw.lead_sources),tags=mapped(raw.tags),refusalReasons=mapped(raw.refusal_reasons),paymentMethods=mapped(raw.payment_methods);
     const notes=mapped(raw.notes),history=mapped(raw.history),notifications=mapped(raw.notifications),auditLogs=mapped(raw.audit_logs),savedFilters=mapped(raw.saved_filters);
     const settingsRow=camelRow(raw.settings);
-    const settings=settingsRow?{version:settingsRow.schemaVersion,timezone:settingsRow.timezone,branding:{companyName:settingsRow.companyName,accentColor:settingsRow.accentColor,logoUrl:settingsRow.logoUrl},reminderMinutes:settingsRow.reminderMinutes,createdAt:settingsRow.createdAt,updatedAt:settingsRow.updatedAt}:null;
+    const settings=settingsRow?{version:settingsRow.schemaVersion,timezone:settingsRow.timezone,branding:{companyName:settingsRow.companyName,accentColor:settingsRow.accentColor,logoUrl:settingsRow.logoUrl},reminderMinutes:settingsRow.reminderMinutes,unassignedTrialReminderMinutes:settingsRow.unassignedTrialReminderMinutes??120,createdAt:settingsRow.createdAt,updatedAt:settingsRow.updatedAt}:null;
     return {
       meta: settings || { version: 1, timezone: "Asia/Almaty", branding: { companyName: "Milton", accentColor: "#3157D5", logoUrl: "" }, reminderMinutes: 30 },
       users, roles, clients, trials, availabilitySlots, payments, paymentCorrections,
@@ -122,6 +122,9 @@ class PostgresStateRepository {
       active:"active", created_at:"createdAt", updated_at:"updatedAt", trial_type:"trialType", trial_amount:"trialAmount",
       trial_payment_date:"trialPaymentDate", registered_by_user_id:"registeredByUserId", receipt_storage_key:"receiptStorageKey",
       receipt_original_name:"receiptOriginalName", receipt_mime_type:"receiptMimeType", receipt_size_bytes:"receiptSizeBytes", receipt_uploaded_at:"receiptUploadedAt",
+      assignment_state:"assignmentState", preferred_time_text:"preferredTimeText", preferred_date:"preferredDate",
+      preferred_start_time:"preferredStartTime", preferred_end_time:"preferredEndTime", assigned_at:"assignedAt",
+      assigned_by_user_id:"assignedByUserId", assignment_version:"assignmentVersion",
     }, { ...row, active:value(row,"active",true), trialType:value(row,"trialType","FREE"), trialAmount:value(row,"trialAmount",0), registeredByUserId:value(row,"registeredByUserId",row.managerId), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });}
 
     for (const row of state.payments) await upsert(this.db, "payments", {
@@ -179,12 +182,12 @@ class PostgresStateRepository {
 
     const meta = fullState.meta || {};
     if(!original||JSON.stringify(original.meta)!==JSON.stringify(meta))await this.db.query(`
-      INSERT INTO public.app_settings (id,schema_version,timezone,company_name,accent_color,logo_url,reminder_minutes,updated_at)
-      VALUES ('global',$1,$2,$3,$4,$5,$6,now())
+      INSERT INTO public.app_settings (id,schema_version,timezone,company_name,accent_color,logo_url,reminder_minutes,unassigned_trial_reminder_minutes,updated_at)
+      VALUES ('global',$1,$2,$3,$4,$5,$6,$7,now())
       ON CONFLICT (id) DO UPDATE SET schema_version=EXCLUDED.schema_version,timezone=EXCLUDED.timezone,
         company_name=EXCLUDED.company_name,accent_color=EXCLUDED.accent_color,logo_url=EXCLUDED.logo_url,
-        reminder_minutes=EXCLUDED.reminder_minutes,updated_at=now()
-    `, [meta.version || 1, meta.timezone || "Asia/Almaty", meta.branding?.companyName || "Milton", meta.branding?.accentColor || "#3157D5", meta.branding?.logoUrl || "", meta.reminderMinutes || 30]);
+        reminder_minutes=EXCLUDED.reminder_minutes,unassigned_trial_reminder_minutes=EXCLUDED.unassigned_trial_reminder_minutes,updated_at=now()
+    `, [meta.version || 1, meta.timezone || "Asia/Almaty", meta.branding?.companyName || "Milton", meta.branding?.accentColor || "#3157D5", meta.branding?.logoUrl || "", meta.reminderMinutes || 30,meta.unassignedTrialReminderMinutes??120]);
   }
 }
 
