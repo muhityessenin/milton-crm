@@ -136,9 +136,10 @@ function databaseError(error) {
   return error;
 }
 
-function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhone, archiveReasons, hashPassword, validImageData }) {
+function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhone, archiveReasons, hashPassword, validImageData, fileStorage, validateTrialPayment }) {
   return async function handle(req, res, url) {
     if (!isHandledRoute(req.method, url.pathname)) return false;
+    let storedReceiptKey = null, deletedReceiptKeys = [];
     try {
       const result = await storage.transaction(async (tx) => {
         const actor = await actorFor(tx, req);
@@ -160,6 +161,8 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
 
         if (req.method === "POST" && url.pathname === "/api/clients") {
           requirePermission(actor, "clients.create"); requirePermission(actor, "schedule.scheduleTrial");
+          const paymentValidation = validateTrialPayment(input);
+          if (paymentValidation.error) throw new HttpError(422, paymentValidation.error);
           const phone = normalizePhone(input.phone), name = String(input.name || "").trim();
           if (!name || phone.length < 12 || !input.closerId || !input.slotId) throw new HttpError(422, "Укажите имя, корректный телефон, клоузера и свободное время");
           const closer = await tx.users.findById(input.closerId);
@@ -168,7 +171,9 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           const managerId = actor.role === "MANAGER" ? actor.id : input.managerId;
           const duplicate = await tx.clients.findByNormalizedPhone(phone);
           if (duplicate) throw new HttpError(409, duplicate.archivedAt ? "Клиент с таким номером находится в архиве" : "Клиент с таким номером телефона уже существует", { clientId: duplicate.id, archived: Boolean(duplicate.archivedAt) });
-          const created = await tx.registerClientAndBookTrial({ clientId: makeId("cl"), trialId: makeId("trial"), actorUserId: actor.id, name, normalizedPhone: phone, originalPhone: input.phone, managerId, closerId: input.closerId, statusId, leadSourceId: input.leadSourceId || null, tagIds: input.tagIds || [], registrationComment: input.comment || "", slotId: input.slotId });
+          const receipt=paymentValidation.value.receipt?await fileStorage.saveDataUrl(paymentValidation.value.receipt.dataUrl,paymentValidation.value.receipt.originalName):null;
+          storedReceiptKey=receipt?.key||null;
+          const created = await tx.registerClientAndBookTrial({ clientId: makeId("cl"), trialId: makeId("trial"), actorUserId: actor.id, name, normalizedPhone: phone, originalPhone: input.phone, managerId, closerId: input.closerId, statusId, leadSourceId: input.leadSourceId || null, tagIds: input.tagIds || [], registrationComment: input.comment || "", slotId: input.slotId,trialType:paymentValidation.value.trialType,trialAmount:paymentValidation.value.trialAmount,trialPaymentDate:paymentValidation.value.trialType==="PAID"?now().slice(0,10):null,registeredByUserId:actor.id,receiptStorageKey:receipt?.key||null,receiptOriginalName:receipt?.originalName||null,receiptMimeType:receipt?.mimeType||null,receiptSizeBytes:receipt?.sizeBytes||null,receiptUploadedAt:receipt?.uploadedAt||null });
           return { status: 201, body: await enrichedClient(tx, created.client.id, actor, archiveReasons) };
         }
 
@@ -180,6 +185,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
             const client = await lockClient(tx, clientId);
             if (!(await clientMatchesScope(tx, actor, client, "clients"))) throw new HttpError(404, "Клиент не найден");
             if (!["УДАЛИТЬ", client.name].includes(String(input.confirmation || ""))) throw new HttpError(422, "Подтвердите постоянное удаление клиента");
+            deletedReceiptKeys=(await tx.db.query("SELECT receipt_storage_key FROM trials WHERE client_id=$1 AND receipt_storage_key IS NOT NULL",[clientId])).rows.map((row)=>row.receipt_storage_key);
             const deleted = await tx.permanentlyDeleteClient({ clientId, actorUserId: actor.id, confirmation: "УДАЛИТЬ" });
             return { status: 200, body: { ...deleted, deletedAt: now(), financialRecordsPreserved: false } };
           }
@@ -305,7 +311,9 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
         throw new Error("Matched PostgreSQL write route was not handled");
       });
       sendJson(res, result.status, result.body);
+      for(const key of deletedReceiptKeys)await fileStorage.remove(key).catch((error)=>console.error(`Receipt cleanup error: ${error.code || error.message}`));
     } catch (rawError) {
+      if(storedReceiptKey)await fileStorage.remove(storedReceiptKey).catch(()=>{});
       const error = databaseError(rawError);
       if (error instanceof HttpError) sendJson(res, error.status, { error: error.message, details: error.details });
       else throw error;

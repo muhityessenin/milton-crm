@@ -60,7 +60,7 @@ test("PostgreSQL repositories preserve CRM shapes and transactional workflows", 
         name: "Repository Client", normalizedPhone: "+77000000991",
         originalPhone: "+7 700 000 99 1", managerId: "repo_manager",
         closerId: "repo_closer", statusId: "repo_status_scheduled",
-        leadSourceId: "repo_source", tagIds: ["repo_tag"], slotId: "repo_slot_1",
+        leadSourceId: "repo_source", tagIds: ["repo_tag"], slotId: "repo_slot_1", trialType:"FREE",
       });
       assert.equal(registered.client.currentManagerId, "repo_manager");
       assert.deepEqual((await tx.clients.findById("repo_client")).tagIds, ["repo_tag"]);
@@ -74,6 +74,7 @@ test("PostgreSQL repositories preserve CRM shapes and transactional workflows", 
       assert.equal(rescheduled.slotId, "repo_slot_2");
       assert.equal((await tx.availabilitySlots.findById("repo_slot_1")).status, "FREE");
       assert.equal((await tx.availabilitySlots.findById("repo_slot_2")).status, "BOOKED");
+      const trialHistory=await tx.trials.listByClient("repo_client");assert.equal(trialHistory.length,2);assert.equal(trialHistory.find((row)=>row.id==="repo_trial_1").attendanceOutcome,"RESCHEDULED");assert.equal(trialHistory.find((row)=>row.id==="repo_trial_2").trialType,"FREE");
 
       const payment = await tx.recordPayment({
         paymentId: "repo_payment_1", historyId: "repo_hist_payment",

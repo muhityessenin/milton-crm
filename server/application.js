@@ -1,6 +1,7 @@
 "use strict";
 
 const http = require("node:http");
+const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
@@ -10,6 +11,9 @@ const { PostgresStorage } = require("../storage/postgres/storage");
 const { createPostgresWriteHandler } = require("../storage/postgres/api-writes");
 const { attachRequestContext, readJsonBody, sendJson, serveStatic } = require("./http");
 const { LoginRateLimiter, clientIp } = require("./login-rate-limit");
+const { LocalFileStorage } = require("./file-storage");
+const { RealtimeHub, resourcesForMutation } = require("./realtime");
+const { validateTrialPayment } = require("./trial-registration");
 
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -17,8 +21,11 @@ const ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = path.join(ROOT, "data");
 const DB_FILE = process.env.JSON_DB_FILE ? path.resolve(process.env.JSON_DB_FILE) : path.join(DATA_DIR, "db.json");
 const PUBLIC_DIR = path.join(ROOT, "public");
+const UPLOAD_DIR = process.env.UPLOAD_DIR ? path.resolve(process.env.UPLOAD_DIR) : path.join(ROOT, "uploads");
 const STORAGE_CONFIG = storageConfig({ rootDir: ROOT });
 const TZ = "Asia/Almaty";
+const fileStorage = new LocalFileStorage({ rootDir:UPLOAD_DIR, maxBytes:Number(process.env.RECEIPT_MAX_BYTES || 5_000_000) });
+const realtimeHub = new RealtimeHub();
 const CLIENT_ARCHIVE_REASONS={DUPLICATE:"Дубль",TEST:"Тест",ERROR:"Ошибка"};
 const loginRateLimiter=new LoginRateLimiter({maxAttempts:Number(process.env.LOGIN_RATE_LIMIT_MAX||10),windowMillis:Number(process.env.LOGIN_RATE_LIMIT_WINDOW_MS||900000)});
 const trustProxy=process.env.TRUST_PROXY==="true";
@@ -152,6 +159,9 @@ function migrateLoadedDb(loaded) {
       if (matching) { matching.id = trial.slotId; migrated = true; }
     }
   }
+  for (const trial of loaded.trials) {
+    if (!trial.trialType) { trial.trialType="FREE"; trial.trialAmount=0; trial.trialPaymentDate=null; trial.registeredByUserId=trial.managerId; trial.receiptStorageKey=null; trial.receiptOriginalName=null; trial.receiptMimeType=null; trial.receiptSizeBytes=null; trial.receiptUploadedAt=null; migrated=true; }
+  }
   return migrated;
 }
 const requestState = new AsyncLocalStorage();
@@ -180,7 +190,7 @@ const db = new Proxy({}, {
 function setDbForTests(next) { ensureAuthorizationModel(next); next.paymentCorrections ||= []; fallbackDb = next; jsonStorage.replaceState(next); }
 function setStorageForTests(next) {
   runtimeStorage = next;
-  if (postgresWriteHandler) postgresWriteHandler=createPostgresWriteHandler({storage:runtimeStorage,readBody:body,sendJson,normalizePhone,archiveReasons:CLIENT_ARCHIVE_REASONS,hashPassword,validImageData});
+  if (postgresWriteHandler) postgresWriteHandler=createPostgresWriteHandler({storage:runtimeStorage,readBody:body,sendJson,normalizePhone,archiveReasons:CLIENT_ARCHIVE_REASONS,hashPassword,validImageData,fileStorage,validateTrialPayment});
 }
 function saveDb() {
   const context=requestState.getStore();
@@ -271,6 +281,24 @@ function dashboard(actor) {
   return { clients: visible.length, todayTrials: trials.length, completed: trials.filter((t) => t.completedAt).length, remaining: trials.filter((t) => new Date(t.scheduledAt) >= new Date()).length, payments: hasPermission(actor,"payments.view")?pays.length:0, revenue: hasPermission(actor,"payments.view")?pays.reduce((n, p) => n + Number(p.amount), 0):0, overdue: visible.map((c)=>enrichClient(c,actor)).filter((c) => c.overdue).length, upcoming: trials.sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt)).map((t) => ({ ...t, client: enrichClient(client(t.clientId),actor) })) };
 }
 
+function bootstrapPayload(actor) {
+  const visibleClients=db.clients.filter((c)=>canSeeClient(actor,c)).map((c)=>enrichClient(c,actor));
+  const archivedClients=hasPermission(actor,"clients.archive")?db.clients.filter((c)=>canSeeArchivedClient(actor,c)).map((c)=>enrichClient(c,actor)):[];
+  const analyticsDimensions=hasPermission(actor,"analytics.view")?{users:analyticsUsersFor(actor).map(publicUser),statuses:db.statuses,leadSources:db.leadSources,tags:db.tags,refusalReasons:db.refusalReasons,paymentMethods:db.paymentMethods}:null;
+  return {me:publicUser(actor),access:effectiveAccess(actor),permissionCatalog:PERMISSION_CATALOG,branding:db.meta.branding,timezone:db.meta.timezone,dashboard:dashboard(actor),clients:visibleClients,archivedClients,archiveReasons:CLIENT_ARCHIVE_REASONS,users:db.users.filter((u)=>hasPermission(actor,"users.view")||u.active).map((u)=>hasPermission(actor,"users.managePermissions")?adminUserView(u):publicUser(u)),roles:canManageUserRoles(actor)?db.roles:[],statuses:db.statuses,leadSources:db.leadSources,tags:db.tags,refusalReasons:db.refusalReasons,paymentMethods:db.paymentMethods,analyticsDimensions,notifications:db.notifications.filter((n)=>n.userId===actor.id).slice(-20).reverse()};
+}
+
+function syncPayload(actor,resources){
+  const full=bootstrapPayload(actor);if(resources.has("bootstrap"))return full;
+  const keys=new Set(),add=(...items)=>items.forEach((item)=>keys.add(item));
+  if(["clients","trials","payments","schedule","analytics"].some((item)=>resources.has(item)))add("dashboard","clients","archivedClients","archiveReasons");
+  if(resources.has("notifications"))add("notifications");
+  if(["users","profile"].some((item)=>resources.has(item)))add("me","access","users","roles","analyticsDimensions");
+  if(resources.has("settings"))add("me","access","permissionCatalog","branding","users","roles","analyticsDimensions");
+  if(resources.has("references"))add("statuses","leadSources","tags","refusalReasons","paymentMethods","analyticsDimensions");
+  return Object.fromEntries([...keys].map((key)=>[key,full[key]]));
+}
+
 const dayKey = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : new Intl.DateTimeFormat("en-CA", { timeZone:TZ }).format(new Date(value));
 const inRange = (value,from,to) => { const key=dayKey(value); return key>=from&&key<=to; };
 const addDays = (date,days) => { const value=new Date(`${date}T12:00:00Z`);value.setUTCDate(value.getUTCDate()+days);return value.toISOString().slice(0,10); };
@@ -300,6 +328,13 @@ function trialAttendanceOutcome(trial) {
   if(trial.completedAt||trial.resultStatusId)return "REACHED";
   if(trial.active&&Date.now()>new Date(trial.scheduledAt).getTime()+3600000)return "OVERDUE";
   return "PENDING";
+}
+function displayTrialStatus(trial) {
+  if (trial.active) return "Записан";
+  if (trial.attendanceOutcome === "RESCHEDULED") return "Перенос";
+  if (trial.attendanceOutcome === "NO_SHOW") return "Не пришёл";
+  if (status(trial.resultStatusId)?.actionType === "REQUIRE_PAYMENT") return "Чек";
+  return defaultRussianNames[trial.resultStatusId] || status(trial.resultStatusId)?.name || "Завершён";
 }
 function attendanceSummary(trials) {
   const scheduled=trials.length,noShow=trials.filter((trial)=>trialAttendanceOutcome(trial)==="NO_SHOW").length,rescheduled=trials.filter((trial)=>trialAttendanceOutcome(trial)==="RESCHEDULED").length,unresolvedOverdue=trials.filter((trial)=>trialAttendanceOutcome(trial)==="OVERDUE").length;
@@ -341,17 +376,29 @@ async function api(req, res, url) {
   }
   const actor = await actorFrom(req);
   if (!actor) return fail(res, 401, "Требуется авторизация");
+  if (req.method === "GET" && url.pathname === "/api/events") return realtimeHub.connect(req,res,actor.id);
+  if (req.method === "GET" && /^\/api\/trials\/[^/]+\/receipt$/.test(url.pathname)) {
+    const trialId=url.pathname.split("/")[3],trial=db.trials.find((item)=>item.id===trialId),c=trial&&client(trial.clientId);
+    if(!trial||!c||!canOpenClient(actor,c)||!hasPermission(actor,"clients.viewHistory")||!trial.receiptStorageKey)return fail(res,404,"Чек не найден");
+    const receiptPath=fileStorage.resolve(trial.receiptStorageKey);if(!receiptPath||!fs.existsSync(receiptPath))return fail(res,404,"Файл чека не найден");
+    res.writeHead(200,{"Content-Type":trial.receiptMimeType||"application/octet-stream","Content-Length":String(trial.receiptSizeBytes||fs.statSync(receiptPath).size),"Content-Disposition":`inline; filename*=UTF-8''${encodeURIComponent(trial.receiptOriginalName||"receipt")}`,"Cache-Control":"private, no-store"});
+    return fs.createReadStream(receiptPath).pipe(res);
+  }
   if (req.method === "GET" && url.pathname === "/api/bootstrap") {
     const notificationCount=db.notifications.length;ensureOperationalNotifications(actor);if(db.notifications.length!==notificationCount)saveDb();
-    const visibleClients = db.clients.filter((c) => canSeeClient(actor, c)).map((c)=>enrichClient(c,actor)),archivedClients=hasPermission(actor,"clients.archive")?db.clients.filter((c)=>canSeeArchivedClient(actor,c)).map((c)=>enrichClient(c,actor)):[];
-    const access = effectiveAccess(actor);
-    const analyticsDimensions=hasPermission(actor,"analytics.view")?{users:analyticsUsersFor(actor).map(publicUser),statuses:db.statuses,leadSources:db.leadSources,tags:db.tags,refusalReasons:db.refusalReasons,paymentMethods:db.paymentMethods}:null;
-    return json(res, 200, { me: publicUser(actor), access, permissionCatalog:PERMISSION_CATALOG, branding: db.meta.branding, timezone: db.meta.timezone, dashboard: dashboard(actor), clients: visibleClients,archivedClients,archiveReasons:CLIENT_ARCHIVE_REASONS, users: db.users.filter((u) => hasPermission(actor,"users.view") || u.active).map((u)=>hasPermission(actor,"users.managePermissions")?adminUserView(u):publicUser(u)), roles:canManageUserRoles(actor) ? db.roles : [], statuses: db.statuses, leadSources: db.leadSources, tags: db.tags, refusalReasons: db.refusalReasons, paymentMethods: db.paymentMethods, analyticsDimensions, notifications: db.notifications.filter((n) => n.userId === actor.id).slice(-20).reverse() });
+    return json(res,200,bootstrapPayload(actor));
+  }
+  if(req.method==="GET"&&url.pathname==="/api/sync"){
+    const allowed=new Set(["bootstrap","clients","trials","schedule","payments","notifications","analytics","users","profile","settings","references"]);
+    const resources=new Set(String(url.searchParams.get("resources")||"").split(",").filter((item)=>allowed.has(item)));
+    if(!resources.size)resources.add("bootstrap");
+    return json(res,200,syncPayload(actor,resources));
   }
   if (req.method === "GET" && /^\/api\/clients\/[^/]+$/.test(url.pathname)) {
     const c = client(url.pathname.split("/").pop()); if (!c || !canOpenClient(actor, c)) return fail(res, 404, "Клиент не найден");
     const mayViewHistory=hasPermission(actor,"clients.viewHistory"),mayViewPayments=hasPermission(actor,"payments.viewHistory")&&clientMatchesScope(actor,c,"payments");
-    return json(res, 200, { client: enrichClient(c,actor), trials:mayViewHistory?db.trials.filter((x) => x.clientId === c.id).sort((a,b) => b.scheduledAt.localeCompare(a.scheduledAt)):[], notes:mayViewHistory?db.notes.filter((x) => x.clientId === c.id).map((n) => ({ ...n, author: publicUser(user(n.authorUserId)) })).sort((a,b) => b.createdAt.localeCompare(a.createdAt)):[], history:mayViewHistory?db.history.filter((x) => x.clientId === c.id).map((h) => ({ ...h, actor: publicUser(user(h.actorUserId)) })).sort((a,b) => b.createdAt.localeCompare(a.createdAt)):[], payments:mayViewPayments?db.payments.filter((x) => x.clientId === c.id).map((p) => ({ ...p, method: db.paymentMethods.find((m) => m.id === p.paymentMethodId), closer: publicUser(user(p.closerAttributionId)) })).sort((a,b) => b.paymentDate.localeCompare(a.paymentDate)):[] });
+    const trials=mayViewHistory?db.trials.filter((x)=>x.clientId===c.id).map((trial)=>{const{receiptStorageKey,...safeTrial}=trial;return{...safeTrial,registeredBy:publicUser(user(trial.registeredByUserId||trial.managerId)),receiptUrl:receiptStorageKey?`/api/trials/${trial.id}/receipt`:null}}).sort((a,b)=>b.scheduledAt.localeCompare(a.scheduledAt)):[];
+    return json(res, 200, { client: enrichClient(c,actor), trials, notes:mayViewHistory?db.notes.filter((x) => x.clientId === c.id).map((n) => ({ ...n, author: publicUser(user(n.authorUserId)) })).sort((a,b) => b.createdAt.localeCompare(a.createdAt)):[], history:mayViewHistory?db.history.filter((x) => x.clientId === c.id).map((h) => ({ ...h, actor: publicUser(user(h.actorUserId)) })).sort((a,b) => b.createdAt.localeCompare(a.createdAt)):[], payments:mayViewPayments?db.payments.filter((x) => x.clientId === c.id).map((p) => ({ ...p, method: db.paymentMethods.find((m) => m.id === p.paymentMethodId), closer: publicUser(user(p.closerAttributionId)) })).sort((a,b) => b.paymentDate.localeCompare(a.paymentDate)):[] });
   }
   if (req.method === "POST" && /^\/api\/clients\/[^/]+\/archive$/.test(url.pathname)) {
     if(!requirePermission(res,actor,"clients.archive"))return;const cid=url.pathname.split("/")[3],c=client(cid);if(!c||c.permanentlyDeletedAt||!clientMatchesScope(actor,c,"clients"))return fail(res,404,"Клиент не найден");if(c.archivedAt)return fail(res,409,"Клиент уже находится в архиве");const input=await body(req),reason=String(input.reason||"");if(!CLIENT_ARCHIVE_REASONS[reason])return fail(res,422,"Выберите причину архивации");const archivedAt=now(),oldValue={archivedAt:c.archivedAt,archiveReason:c.archiveReason};c.archivedAt=archivedAt;c.archivedByUserId=actor.id;c.archiveReason=reason;c.updatedAt=archivedAt;const activeTrial=db.trials.find((trial)=>trial.clientId===c.id&&trial.active);if(activeTrial){activeTrial.active=false;activeTrial.archiveInterruptedAt=archivedAt;const slot=db.availabilitySlots.find((item)=>item.id===activeTrial.slotId);if(slot&&slot.bookedTrialId===activeTrial.id){slot.status="FREE";slot.bookedTrialId=null;}}history(c.id,actor.id,"CLIENT_ARCHIVED",oldValue,{reason,reasonLabel:CLIENT_ARCHIVE_REASONS[reason],archivedAt});audit(actor.id,"CLIENT",c.id,"CLIENT_ARCHIVED",oldValue,{reason,reasonLabel:CLIENT_ARCHIVE_REASONS[reason],archivedAt,archivedByUserId:actor.id});saveDb();return json(res,200,enrichClient(c,actor));
@@ -363,11 +410,11 @@ async function api(req, res, url) {
     if(!actor.isOwner)return fail(res,403,"Постоянное удаление доступно только владельцу системы");
     const cid=url.pathname.split("/")[3],c=client(cid);if(!c||c.permanentlyDeletedAt||!clientMatchesScope(actor,c,"clients"))return fail(res,404,"Клиент не найден");
     const input=await body(req);if(!["УДАЛИТЬ",c.name].includes(String(input.confirmation||"")))return fail(res,422,"Подтвердите постоянное удаление клиента");
-    const trialIds=new Set(db.trials.filter(item=>item.clientId===c.id).map(item=>item.id)),paymentIds=new Set(db.payments.filter(item=>item.clientId===c.id).map(item=>item.id)),removed={trials:trialIds.size,payments:paymentIds.size,notes:db.notes.filter(item=>item.clientId===c.id).length,history:db.history.filter(item=>item.clientId===c.id).length};
+    const clientTrials=db.trials.filter(item=>item.clientId===c.id),trialIds=new Set(clientTrials.map(item=>item.id)),paymentIds=new Set(db.payments.filter(item=>item.clientId===c.id).map(item=>item.id)),removed={trials:trialIds.size,payments:paymentIds.size,notes:db.notes.filter(item=>item.clientId===c.id).length,history:db.history.filter(item=>item.clientId===c.id).length};
     for(const slot of db.availabilitySlots.filter(item=>trialIds.has(item.bookedTrialId))){slot.status="FREE";slot.bookedTrialId=null;}
     db.trials=db.trials.filter(item=>item.clientId!==c.id);db.payments=db.payments.filter(item=>item.clientId!==c.id);db.notes=db.notes.filter(item=>item.clientId!==c.id);db.history=db.history.filter(item=>item.clientId!==c.id);db.notifications=db.notifications.filter(item=>item.clientId!==c.id);
     db.auditLogs=db.auditLogs.filter(item=>!(item.entityType==="CLIENT"&&item.entityId===c.id)&&!(item.entityType==="PAYMENT"&&paymentIds.has(item.entityId)));
-    db.clients=db.clients.filter(item=>item.id!==c.id);audit(actor.id,"CLIENT",c.id,"CLIENT_PERMANENTLY_DELETED",null,{hardDeleted:true,relatedRecordsRemoved:removed});saveDb();return json(res,200,{id:c.id,deletedAt:now(),hardDeleted:true,financialRecordsPreserved:false,relatedRecordsRemoved:removed});
+    db.clients=db.clients.filter(item=>item.id!==c.id);audit(actor.id,"CLIENT",c.id,"CLIENT_PERMANENTLY_DELETED",null,{hardDeleted:true,relatedRecordsRemoved:removed});saveDb();for(const trial of clientTrials)if(trial.receiptStorageKey)await fileStorage.remove(trial.receiptStorageKey).catch((error)=>console.error(`Receipt cleanup error: ${error.code||error.message}`));return json(res,200,{id:c.id,deletedAt:now(),hardDeleted:true,financialRecordsPreserved:false,relatedRecordsRemoved:removed});
   }
   if (req.method === "PUT" && url.pathname === "/api/admin/branding") {
     if (!requirePermission(res,actor,"settings.manageBranding")) return;
@@ -426,16 +473,18 @@ async function api(req, res, url) {
     if (!requirePermission(res, actor, "schedule.view")) return;
     const closerId = url.searchParams.get("closerId"); const date = url.searchParams.get("date");
     if (closerId && closerId !== actor.id && ((!hasPermission(actor,"schedule.viewOthers") && !hasPermission(actor,"schedule.manageOthers")) || !userMatchesScope(actor,closerId,"schedule"))) return fail(res,403,"Нет доступа к расписанию другого сотрудника");
-    return json(res, 200, db.availabilitySlots.filter((s) => (!closerId || s.closerId === closerId) && (!date || dayKey(s.startAt) === date)).sort((a,b) => a.startAt.localeCompare(b.startAt)).map((s)=>({...s,clientId:db.trials.find((t)=>t.id===s.bookedTrialId)?.clientId||null})));
+    return json(res, 200, db.availabilitySlots.filter((s) => (!closerId || s.closerId === closerId) && (!date || dayKey(s.startAt) === date)).sort((a,b) => a.startAt.localeCompare(b.startAt)).map((s)=>{const events=db.trials.filter((t)=>t.slotId===s.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map((t)=>{const next=t.attendanceOutcome==="RESCHEDULED"?db.trials.filter((candidate)=>candidate.clientId===t.clientId&&candidate.id!==t.id&&candidate.createdAt>=t.resultAt).sort((a,b)=>a.createdAt.localeCompare(b.createdAt))[0]:null,visibleClient=client(t.clientId);return{id:t.id,clientId:visibleClient&&canOpenClient(actor,visibleClient)?t.clientId:null,slotId:t.slotId,scheduledAt:t.scheduledAt,active:t.active,resultStatusId:t.resultStatusId||null,attendanceOutcome:t.attendanceOutcome||null,statusName:displayTrialStatus(t),rescheduledTo:next?{trialId:next.id,scheduledAt:next.scheduledAt}:null}});const booked=events.find((t)=>t.id===s.bookedTrialId);return{...s,clientId:booked?.clientId||null,events};}));
   }
   if (req.method === "POST" && url.pathname === "/api/clients") {
     if (!requirePermission(res, actor, "clients.create") || !requirePermission(res, actor, "schedule.scheduleTrial")) return;
-    const input = await body(req); const normalizedPhone = normalizePhone(input.phone);
+    const input = await body(req); const normalizedPhone = normalizePhone(input.phone),trialPayment=validateTrialPayment(input);
+    if(trialPayment.error)return fail(res,422,trialPayment.error);
     if (!input.name || normalizedPhone.length < 12 || !input.closerId || !input.slotId) return fail(res, 422, "Укажите имя, корректный телефон, клоузера и свободное время");
     const duplicate = db.clients.find((c) => !c.permanentlyDeletedAt&&c.normalizedPhone === normalizedPhone); if (duplicate) return json(res, 409, { error:duplicate.archivedAt?"Клиент с таким номером находится в архиве":"Клиент с таким номером телефона уже существует", clientId: duplicate.id,archived:Boolean(duplicate.archivedAt),canRestore:Boolean(duplicate.archivedAt&&hasPermission(actor,"clients.archive")&&clientMatchesScope(actor,duplicate,"clients")) });
     const slot = db.availabilitySlots.find((s) => s.id === input.slotId && s.closerId === input.closerId); if (!slot || slot.status !== "FREE") return fail(res, 409, "Это время больше недоступно");
     const managerId = actor.role === "MANAGER" ? actor.id : input.managerId; const c = { id: id("cl"), name: input.name.trim(), normalizedPhone, originalPhone: input.phone, originalManagerId: managerId, currentManagerId: managerId, currentCloserId: input.closerId, currentStatusId: input.statusId || db.statuses.filter((s) => s.active).sort((a,b) => a.sortOrder-b.sortOrder)[0].id, leadSourceId: input.leadSourceId || null, tagIds: input.tagIds || [], registrationComment: input.comment || "",archivedAt:null,archivedByUserId:null,archiveReason:null,permanentlyDeletedAt:null,permanentlyDeletedByUserId:null, createdAt: now(), updatedAt: now() };
-    const trial = { id: id("trial"), clientId: c.id, closerId: c.currentCloserId, managerId, slotId: slot.id, scheduledAt: slot.startAt, completedAt: null, statusAtBookingId: c.currentStatusId, active: true, createdAt: now() };
+    const receipt=trialPayment.value.receipt?await fileStorage.saveDataUrl(trialPayment.value.receipt.dataUrl,trialPayment.value.receipt.originalName):null;
+    const trial = { id: id("trial"), clientId: c.id, closerId: c.currentCloserId, managerId, slotId: slot.id, scheduledAt: slot.startAt, completedAt: null, statusAtBookingId: c.currentStatusId, active: true, createdAt: now(),trialType:trialPayment.value.trialType,trialAmount:trialPayment.value.trialAmount,trialPaymentDate:trialPayment.value.trialType==="PAID"?dayKey(now()):null,registeredByUserId:actor.id,receiptStorageKey:receipt?.key||null,receiptOriginalName:receipt?.originalName||null,receiptMimeType:receipt?.mimeType||null,receiptSizeBytes:receipt?.sizeBytes||null,receiptUploadedAt:receipt?.uploadedAt||null };
     db.clients.push(c); db.trials.push(trial); slot.status = "BOOKED"; slot.bookedTrialId = trial.id;
     history(c.id, actor.id, "CLIENT_CREATED", null, { name: c.name, phone: normalizedPhone }); history(c.id, actor.id, "TRIAL_SCHEDULED", null, { scheduledAt: trial.scheduledAt, closerId: trial.closerId }); notify(c.currentCloserId, c.id, "TRIAL_ASSIGNED", `${c.name} · ${trial.scheduledAt}`); saveDb();
     return json(res, 201, enrichClient(c,actor));
@@ -473,7 +522,7 @@ async function api(req, res, url) {
       const amount = Number(input.amount); if (!(amount > 0) || !db.paymentMethods.some((m) => m.id === input.paymentMethodId && m.active) || !/^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate)) return fail(res, 422, "Укажите корректную сумму, способ и дату оплаты");
       const payment = { id: id("pay"), clientId: c.id, managerAttributionId: c.originalManagerId, closerAttributionId: actor.role === "CLOSER" ? actor.id : c.currentCloserId, amount, paymentMethodId: input.paymentMethodId, paymentDate: input.paymentDate, comment: input.paymentComment || "", createdBy: actor.id, createdAt: now(), correctedFromPaymentId: null, voidedAt: null }; db.payments.push(payment); history(c.id, actor.id, "PAYMENT_CREATED", null, { paymentId: payment.id, amount, paymentDate: payment.paymentDate }); notify(c.currentManagerId, c.id, "PAYMENT_RECORDED", `${c.name} · ${amount} ₸`);
     }
-    c.currentStatusId = next.id; c.updatedAt = now(); const activeTrial = db.trials.find((t) => t.clientId === c.id && t.active); if (activeTrial && next.actionType !== "REQUIRE_RESCHEDULE" && next.id!==activeTrial.statusAtBookingId){activeTrial.completedAt = now();activeTrial.active=false;activeTrial.resultStatusId=next.id;activeTrial.resultAt=now();activeTrial.resultActorUserId=actor.id;activeTrial.attendanceOutcome=next.actionType==="MARK_NO_SHOW"?"NO_SHOW":"REACHED";} history(c.id, actor.id, "STATUS_CHANGED", { statusId: oldStatusId }, { statusId: next.id, refusalReasonId: input.refusalReasonId || null,trialId:activeTrial?.id||null,attendanceOutcome:activeTrial?.attendanceOutcome||null }); saveDb(); return json(res, 200, enrichClient(c,actor));
+    c.currentStatusId = next.id; c.updatedAt = now(); const activeTrial = db.trials.find((t) => t.clientId === c.id && t.active); if (activeTrial && next.actionType !== "REQUIRE_RESCHEDULE" && next.id!==activeTrial.statusAtBookingId){activeTrial.completedAt = now();activeTrial.active=false;activeTrial.resultStatusId=next.id;activeTrial.resultAt=now();activeTrial.resultActorUserId=actor.id;activeTrial.attendanceOutcome=next.actionType==="MARK_NO_SHOW"?"NO_SHOW":"REACHED";const occupiedSlot=db.availabilitySlots.find((s)=>s.id===activeTrial.slotId&&s.bookedTrialId===activeTrial.id);if(occupiedSlot)occupiedSlot.status="OCCUPIED";} history(c.id, actor.id, "STATUS_CHANGED", { statusId: oldStatusId }, { statusId: next.id, refusalReasonId: input.refusalReasonId || null,trialId:activeTrial?.id||null,attendanceOutcome:activeTrial?.attendanceOutcome||null }); saveDb(); return json(res, 200, enrichClient(c,actor));
   }
   if (req.method === "POST" && url.pathname === "/api/slots/generate") {
     const input = await body(req); const requestedCloser = input.closerId || actor.id; const managingOther = requestedCloser !== actor.id;
@@ -512,7 +561,7 @@ async function api(req, res, url) {
   return fail(res, 404, "Адрес API не найден");
 }
 
-postgresWriteHandler=createPostgresWriteHandler({storage:runtimeStorage,readBody:body,sendJson,normalizePhone,archiveReasons:CLIENT_ARCHIVE_REASONS,hashPassword,validImageData});
+postgresWriteHandler=createPostgresWriteHandler({storage:runtimeStorage,readBody:body,sendJson,normalizePhone,archiveReasons:CLIENT_ARCHIVE_REASONS,hashPassword,validImageData,fileStorage,validateTrialPayment});
 async function handleRequest(req,res){
   const startedAt=process.hrtime.bigint();
   const requestId=attachRequestContext(req,res);
@@ -553,6 +602,9 @@ async function handleRequest(req,res){
     const durationMs=Number(process.hrtime.bigint()-startedAt)/1e6;
     const requestPath=urlForLog(req.url);
     if(requestPath!=="/api/health")console.log(JSON.stringify({type:"http_request",requestId,method:req.method,path:requestPath,status:res.statusCode,durationMs:Number(durationMs.toFixed(1))}));
+    if(res.statusCode>=200&&res.statusCode<300&&requestPath!=="/api/login"){
+      const resources=resourcesForMutation(req.method,requestPath);if(resources.length)realtimeHub.publish(resources);
+    }
   }
 }
 function urlForLog(value){try{return new URL(value,"http://localhost").pathname;}catch{return "/invalid-url";}}
@@ -561,16 +613,17 @@ server.requestTimeout=30_000;
 server.headersTimeout=35_000;
 server.keepAliveTimeout=5_000;
 server.maxRequestsPerSocket=1_000;
-async function startServer(port=PORT,host=HOST){if(STORAGE_CONFIG.backend==="postgres")await runtimeStorage.assertSchema();return new Promise((resolve,reject)=>{server.once("error",reject);server.listen(port,host,()=>{server.off("error",reject);resolve(server);});});}
-async function closeStorage(){await runtimeStorage.close();}
+async function startServer(port=PORT,host=HOST){if(STORAGE_CONFIG.backend==="postgres"){await runtimeStorage.assertSchema();await runtimeStorage.startChangeListener((resources)=>realtimeHub.publish(resources));}return new Promise((resolve,reject)=>{server.once("error",reject);server.listen(port,host,()=>{server.off("error",reject);resolve(server);});});}
+async function closeStorage(){realtimeHub.close();await runtimeStorage.close();}
 async function run(){
   let shuttingDown=false;
   const shutdown=async(signal)=>{
     if(shuttingDown)return;
     shuttingDown=true;
     console.log(`Milton CRM: ${signal}, завершение работы`);
+    realtimeHub.close();
     if(server.listening)await new Promise((resolve)=>server.close(resolve));
-    await closeStorage();
+    await runtimeStorage.close();
   };
   for(const signal of ["SIGINT","SIGTERM"])process.once(signal,()=>shutdown(signal).then(()=>process.exit(0)).catch((error)=>{console.error(error);process.exit(1);}));
   return startServer().then(()=>console.log(`Milton CRM запущена: http://${HOST}:${PORT} · ${STORAGE_CONFIG.backend}`)).catch((error)=>{console.error(error);process.exitCode=1;});

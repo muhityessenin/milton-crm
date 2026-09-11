@@ -1,12 +1,21 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { Pool } = require("pg");
+const { Pool, Client } = require("pg");
 const { createRepositories, camelRow } = require("./repositories");
 const { PostgresStateRepository } = require("./state-repository");
 
 const id = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
 const now = () => new Date().toISOString();
+const CHANGE_RESOURCES = {
+  clients:["clients","schedule","analytics"], trials:["trials","schedule","clients","analytics"],
+  availability_slots:["schedule"], payments:["payments","clients","analytics"], payment_corrections:["payments","clients","analytics"],
+  notes:["clients"], client_history:["clients"], notifications:["notifications"], users:["users","schedule","clients"],
+  roles:["users","settings"], role_permissions:["users","settings"], role_scopes:["users","settings"],
+  user_permission_overrides:["users","settings"], user_scope_overrides:["users","settings"],
+  statuses:["references","clients","analytics"], lead_sources:["references","clients","analytics"], tags:["references","clients"],
+  refusal_reasons:["references","analytics"], payment_methods:["references","analytics"], app_settings:["settings"],
+};
 
 class PostgresStorage {
   constructor({ pool, db = pool, ownsPool = true, stateCache, stateCacheTtlMillis = 250 }) {
@@ -16,6 +25,9 @@ class PostgresStorage {
     this.stateCache = stateCache || { value: null, expiresAt: 0, pending: null };
     this.stateCacheTtlMillis = stateCacheTtlMillis;
     this.stateWriteQueue = Promise.resolve();
+    this.changeListener = null;
+    this.changeListenerTimer = null;
+    this.changeListenerStopped = false;
     Object.assign(this, createRepositories(db));
     this.state = new PostgresStateRepository(this);
   }
@@ -50,11 +62,49 @@ class PostgresStorage {
   async assertSchema() {
     const result = await this.db.query(`
       SELECT version FROM public.schema_migrations
-      WHERE version IN ('001', '002', '003', '004') ORDER BY version
+      WHERE version IN ('001', '002', '003', '004', '005') ORDER BY version
     `);
-    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004") {
-      throw new Error("Milton PostgreSQL migrations 001 through 004 are required");
+    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005") {
+      throw new Error("Milton PostgreSQL migrations 001 through 005 are required");
     }
+  }
+
+  async startChangeListener(onChange) {
+    if (!this.ownsPool || this.changeListener) return;
+    this.changeListenerStopped = false;
+    const client = new Client(this.pool.options);
+    try { await client.connect(); }
+    catch (error) { await client.end().catch(()=>{}); throw error; }
+    const handle = (message) => {
+      try {
+        const payload = JSON.parse(message.payload || "{}");
+        this.invalidateStateCache();
+        onChange(CHANGE_RESOURCES[payload.table] || ["bootstrap"]);
+      } catch { onChange(["bootstrap"]); }
+    };
+    const reconnect = (error) => {
+      if(error)console.error(`PostgreSQL realtime listener error: ${error.code || error.message}`);
+      if(this.changeListenerStopped||this.changeListenerTimer)return;
+      this.changeListener=null;
+      client.off("notification",handle);client.end().catch(()=>{});
+      this.changeListenerTimer=setTimeout(()=>{this.changeListenerTimer=null;this.startChangeListener(onChange).catch(reconnect)},1000);
+      this.changeListenerTimer.unref?.();
+    };
+    client.on("notification", handle);
+    client.once("error", reconnect);
+    client.once("end", ()=>reconnect());
+    await client.query("LISTEN milton_crm_changes");
+    this.changeListener = { client, handle };
+  }
+
+  async stopChangeListener() {
+    this.changeListenerStopped=true;clearTimeout(this.changeListenerTimer);this.changeListenerTimer=null;
+    if (!this.changeListener) return;
+    const { client, handle } = this.changeListener;
+    this.changeListener = null;
+    client.off("notification", handle);
+    await client.query("UNLISTEN milton_crm_changes").catch(() => {});
+    await client.end().catch(() => {});
   }
 
   invalidateStateCache() {
@@ -179,6 +229,15 @@ class PostgresStorage {
         statusAtBookingId: input.statusId,
         active: true,
         createdAt,
+        trialType: input.trialType || "FREE",
+        trialAmount: input.trialAmount || 0,
+        trialPaymentDate: input.trialPaymentDate || null,
+        registeredByUserId: input.registeredByUserId || input.actorUserId,
+        receiptStorageKey: input.receiptStorageKey || null,
+        receiptOriginalName: input.receiptOriginalName || null,
+        receiptMimeType: input.receiptMimeType || null,
+        receiptSizeBytes: input.receiptSizeBytes || null,
+        receiptUploadedAt: input.receiptUploadedAt || null,
       });
       await tx.history.append({ id: input.clientHistoryId || id("hist"), clientId: client.id, actorUserId: input.actorUserId, eventType: "CLIENT_CREATED", oldValue: null, newValue: { name: client.name, phone: client.normalizedPhone }, createdAt });
       await tx.history.append({ id: input.trialHistoryId || id("hist"), clientId: client.id, actorUserId: input.actorUserId, eventType: "TRIAL_SCHEDULED", oldValue: null, newValue: { scheduledAt: trial.scheduledAt, closerId: trial.closerId }, createdAt });
@@ -322,6 +381,7 @@ class PostgresStorage {
   }
 
   async close() {
+    await this.stopChangeListener();
     if (this.ownsPool) await this.pool.end();
   }
 }

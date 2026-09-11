@@ -41,7 +41,7 @@ function sendJson(res, code, value) {
   res.end(JSON.stringify(value));
 }
 
-async function readJsonBody(req, limitBytes = 2_000_000) {
+async function readJsonBody(req, limitBytes = 7_000_000) {
   let raw = "";
   for await (const chunk of req) {
     raw += chunk;

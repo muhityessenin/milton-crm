@@ -39,8 +39,8 @@ async function upsertReference(client,table,row,extra={}){
 
 async function importSeed(client,seed){
   await client.query("SELECT pg_advisory_xact_lock(hashtext('milton_crm_controlled_seed'))");
-  const migrations=await client.query("SELECT version FROM public.schema_migrations WHERE version=ANY($1::text[])",[["001","002","003","004"]]);
-  if(migrations.rowCount!==4)throw new Error("Migrations 001–004 must be applied before seed");
+  const migrations=await client.query("SELECT version FROM public.schema_migrations WHERE version=ANY($1::text[])",[["001","002","003","004","005"]]);
+  if(migrations.rowCount!==5)throw new Error("Migrations 001–005 must be applied before seed");
   const dbBusiness=await client.query("SELECT (SELECT count(*)::int FROM public.clients) clients,(SELECT count(*)::int FROM public.trials) trials,(SELECT count(*)::int FROM public.payments) payments");
   if(Object.values(dbBusiness.rows[0]).some(Boolean))throw new Error(`Supabase business tables are not empty: ${JSON.stringify(dbBusiness.rows[0])}`);
   const loginConflict=await client.query("SELECT id FROM public.users WHERE lower(login)=lower($1) AND id<>$2",[seed.owner.login,seed.owner.id]);

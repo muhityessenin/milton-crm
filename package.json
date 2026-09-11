@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check server/application.js && node --check server/http.js && node --check server/login-rate-limit.js && node --check scripts/bootstrap-postgres.js && node --check scripts/migrate-postgres.js && node --check public/app.js",
+    "check": "node --check server.js && node --check server/application.js && node --check server/http.js && node --check server/login-rate-limit.js && node --check server/realtime.js && node --check server/file-storage.js && node --check server/trial-registration.js && node --check storage/postgres/storage.js && node --check storage/postgres/api-writes.js && node --check public/avatar-crop.js && node --check public/app.js && node --check scripts/bootstrap-postgres.js && node --check scripts/migrate-postgres.js",
     "test": "node --test tests/*.test.js",
     "test:postgres": "RUN_POSTGRES_TESTS=1 node --test tests/postgres-repositories.integration.test.js",
     "test:postgres-api": "RUN_POSTGRES_API_TESTS=1 node --test tests/api-postgres.integration.test.js",

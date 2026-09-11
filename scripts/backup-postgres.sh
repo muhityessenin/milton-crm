@@ -22,6 +22,8 @@ install -d -m 700 "$BACKUP_DIR"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 target="$BACKUP_DIR/milton-$timestamp.dump"
 temporary="$target.partial"
+receipt_target="$BACKUP_DIR/milton-$timestamp.receipts.tar.gz"
+receipt_temporary="$receipt_target.partial"
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 
 "${compose[@]}" exec -T db pg_dump \
@@ -35,7 +37,13 @@ compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 "${compose[@]}" exec -T db pg_restore --list < "$temporary" >/dev/null
 chmod 600 "$temporary"
 mv "$temporary" "$target"
+"${compose[@]}" run --rm --no-deps --entrypoint sh app -c "tar -C /app/uploads -czf - ." > "$receipt_temporary"
+tar -tzf "$receipt_temporary" >/dev/null
+chmod 600 "$receipt_temporary"
+mv "$receipt_temporary" "$receipt_target"
 find "$BACKUP_DIR" -type f -name 'milton-*.dump' -mtime "+$BACKUP_RETENTION_DAYS" -delete
+find "$BACKUP_DIR" -type f -name 'milton-*.receipts.tar.gz' -mtime "+$BACKUP_RETENTION_DAYS" -delete
 
 echo "Backup created and verified: $target"
+echo "Receipt backup created and verified: $receipt_target"
 echo "Copy it to encrypted storage outside this VPS."

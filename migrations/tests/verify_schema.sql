@@ -29,8 +29,9 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '001')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '002')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '003')
-    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '004') THEN
-    RAISE EXCEPTION 'Expected schema migration versions 001 through 004';
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '004')
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '005') THEN
+    RAISE EXCEPTION 'Expected schema migration versions 001 through 005';
   END IF;
 END;
 $$;
@@ -81,6 +82,11 @@ BEGIN
 
   IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='payments_actor_idempotency_uidx') THEN
     RAISE EXCEPTION 'Missing payment idempotency index';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='trials' AND column_name='trial_type')
+    OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='trials' AND column_name='receipt_storage_key') THEN
+    RAISE EXCEPTION 'Missing paid-trial receipt metadata columns';
   END IF;
 END;
 $$;
@@ -164,10 +170,10 @@ INSERT INTO public.availability_slots (
 );
 
 INSERT INTO public.trials (
-  id, client_id, manager_id, closer_id, slot_id, scheduled_at, status_at_booking_id
+  id, client_id, manager_id, closer_id, slot_id, scheduled_at, status_at_booking_id, registered_by_user_id
 ) VALUES (
   'test_trial_1', 'test_client_1', 'test_manager', 'test_closer', 'test_slot_1',
-  '2026-09-10 10:00:00+05', 'test_status_scheduled'
+  '2026-09-10 10:00:00+05', 'test_status_scheduled', 'test_manager'
 );
 
 DO $$
@@ -183,10 +189,10 @@ BEGIN
 
   BEGIN
     INSERT INTO public.trials (
-      id, client_id, manager_id, closer_id, slot_id, scheduled_at, status_at_booking_id
+      id, client_id, manager_id, closer_id, slot_id, scheduled_at, status_at_booking_id, registered_by_user_id
     ) VALUES (
       'test_trial_double_booking', 'test_client_2', 'test_manager', 'test_closer',
-      'test_slot_1', '2026-09-10 10:00:00+05', 'test_status_scheduled'
+      'test_slot_1', '2026-09-10 10:00:00+05', 'test_status_scheduled', 'test_manager'
     );
     RAISE EXCEPTION 'Double booking was not rejected';
   EXCEPTION
@@ -205,6 +211,14 @@ SET active = false,
     result_actor_user_id = 'test_owner',
     attendance_outcome = 'REACHED'
 WHERE id = 'test_trial_1';
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.availability_slots WHERE id='test_slot_1' AND status='OCCUPIED' AND booked_trial_id='test_trial_1') THEN
+    RAISE EXCEPTION 'Completed trial did not preserve its occupied historical slot';
+  END IF;
+END;
+$$;
 
 INSERT INTO public.payments (
   id, client_id, manager_attribution_id, closer_attribution_id, amount,
