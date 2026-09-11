@@ -16,5 +16,7 @@
     return slots.filter((slot)=>slot.status==="FREE").map((slot)=>({...slot,time:timeKey(slot.startAt,timeZone),distance:Math.abs(timeMinutes(timeKey(slot.startAt,timeZone))-targetMinutes)})).sort((a,b)=>a.distance-b.distance||a.startAt.localeCompare(b.startAt)).slice(0,limit);
   }
   function preset(slot,date){return{closerId:slot.closerId,date,slotId:slot.id};}
-  return{timeKey,timeMinutes,shiftDate,columns,nearestFree,preset};
+  function preferredMatchScore(trial,slotTime){const text=String(trial.preferredTimeText||"").toLowerCase(),minutes=timeMinutes(slotTime);let score=0;const clocks=[...text.matchAll(/(\d{1,2}):?(\d{2})?/g)].map((m)=>Number(m[1])*60+Number(m[2]||0));if(/после/.test(text)&&clocks[0]!=null&&minutes>=clocks[0])score+=4;if(/вечер/.test(text)&&minutes>=1080)score+=3;if(clocks.length>=2&&minutes>=clocks[0]&&minutes<=clocks[1])score+=5;if(trial.preferredStartTime&&minutes>=timeMinutes(trial.preferredStartTime))score+=3;if(trial.preferredEndTime&&minutes<=timeMinutes(trial.preferredEndTime))score+=3;return score;}
+  function rankUnassigned(items,slotTime){return[...items].sort((a,b)=>preferredMatchScore(b,slotTime)-preferredMatchScore(a,slotTime)||String(a.createdAt).localeCompare(String(b.createdAt)));}
+  return{timeKey,timeMinutes,shiftDate,columns,nearestFree,preset,preferredMatchScore,rankUnassigned};
 });

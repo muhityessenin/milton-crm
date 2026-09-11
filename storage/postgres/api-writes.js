@@ -98,8 +98,8 @@ async function enrichedClient(tx, clientId, viewer, archiveReasons) {
   const status = camelRow(raw.status_row), leadSource = camelRow(raw.source_row), activeTrial = camelRow(raw.active_trial_row);
   const tags = (raw.tags_rows || []).map(camelRow), payments = (raw.payments_rows || []).map(mapPayment);
   const activePayments = payments.filter((payment) => !payment.voidedAt);
-  const overdue = activeTrial && new Date(activeTrial.scheduledAt).getTime() + 3600000 < Date.now() && client.currentStatusId === activeTrial.statusAtBookingId;
-  return { ...client, manager: publicUser(manager), closer: publicUser(closer), originalManager: publicUser(originalManager), archivedBy: publicUser(archivedBy), archiveReasonLabel: archiveReasons[client.archiveReason] || client.archiveReason || null, status, leadSource, tags, activeTrial, payments: activePayments, paymentTotal: activePayments.reduce((sum, payment) => sum + Number(payment.amount), 0), overdue: Boolean(overdue) };
+  const overdue = activeTrial?.assignmentState!=="UNASSIGNED" && activeTrial?.scheduledAt && new Date(activeTrial.scheduledAt).getTime() + 3600000 < Date.now() && client.currentStatusId === activeTrial.statusAtBookingId;
+  return { ...client, manager: publicUser(manager), closer: publicUser(closer)||{id:null,name:"Без клоузера",role:"CLOSER",avatarUrl:""}, originalManager: publicUser(originalManager), archivedBy: publicUser(archivedBy), archiveReasonLabel: archiveReasons[client.archiveReason] || client.archiveReason || null, status, leadSource, tags, activeTrial, payments: activePayments, paymentTotal: activePayments.reduce((sum, payment) => sum + Number(payment.amount), 0), overdue: Boolean(overdue) };
 }
 
 async function appendHistory(tx, clientId, actorId, eventType, oldValue, newValue, createdAt = now()) {
@@ -110,8 +110,9 @@ async function appendNotification(tx, userId, clientId, type, content, trialId =
 }
 
 function isHandledRoute(method, pathname) {
-  if ((method === "POST" && ["/api/clients", "/api/slots/generate"].includes(pathname)) || (method === "PUT" && pathname === "/api/profile")) return true;
+  if ((method === "POST" && ["/api/clients", "/api/slots/generate"].includes(pathname)) || (method === "PUT" && ["/api/profile","/api/admin/unassigned-settings"].includes(pathname))) return true;
   return (method === "POST" && /^\/api\/clients\/[^/]+\/(archive|restore|notes|reassign|status)$/.test(pathname))
+    || (method === "POST" && /^\/api\/trials\/[^/]+\/(assign|reassign)$/.test(pathname))
     || (method === "DELETE" && /^\/api\/clients\/[^/]+$/.test(pathname))
     || (method === "POST" && /^\/api\/payments\/[^/]+\/correct$/.test(pathname))
     || (method === "POST" && /^\/api\/notifications\/[^/]+\/read$/.test(pathname));
@@ -158,23 +159,46 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           await tx.auditLogs.append({ id: makeId("audit"), actorUserId: actor.id, entityType: "USER", entityId: actor.id, action: "PROFILE_UPDATED", oldValue, newValue: publicUser(value) });
           return { status: 200, body: publicUser(value) };
         }
+        if(req.method==="PUT"&&url.pathname==="/api/admin/unassigned-settings"){
+          requirePermission(actor,"settings.manageBranding");const minutes=Number(input.minutes);if(!Number.isInteger(minutes)||minutes<0||minutes>10080)throw new HttpError(422,"Укажите порог от 0 до 10080 минут");await tx.db.query("UPDATE app_settings SET unassigned_trial_reminder_minutes=$1,updated_by_user_id=$2,updated_at=now() WHERE id='global'",[minutes,actor.id]);await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"SETTINGS",entityId:"unassigned-trials",action:"UNASSIGNED_REMINDER_CHANGED",oldValue:null,newValue:{minutes},createdAt:now()});return{status:200,body:{minutes}};
+        }
 
         if (req.method === "POST" && url.pathname === "/api/clients") {
           requirePermission(actor, "clients.create"); requirePermission(actor, "schedule.scheduleTrial");
           const paymentValidation = validateTrialPayment(input);
           if (paymentValidation.error) throw new HttpError(422, paymentValidation.error);
           const phone = normalizePhone(input.phone), name = String(input.name || "").trim();
-          if (!name || phone.length < 12 || !input.closerId || !input.slotId) throw new HttpError(422, "Укажите имя, корректный телефон, клоузера и свободное время");
-          const closer = await tx.users.findById(input.closerId);
-          if (!closer?.active || closer.role !== "CLOSER") throw new HttpError(422, "Выберите активного клоузера");
+          const unassigned=input.assignmentMode==="LATER";
+          if (!name || phone.length < 12 || (!unassigned&&(!input.closerId || !input.slotId))) throw new HttpError(422, unassigned?"Укажите имя и корректный телефон":"Укажите имя, корректный телефон, клоузера и свободное время");
+          const closer = unassigned?null:await tx.users.findById(input.closerId);
+          if (!unassigned&&(!closer?.active || closer.role !== "CLOSER")) throw new HttpError(422, "Выберите активного клоузера");
           const statusId = input.statusId || (await tx.db.query("SELECT id FROM statuses WHERE active ORDER BY sort_order,id LIMIT 1")).rows[0]?.id;
           const managerId = actor.role === "MANAGER" ? actor.id : input.managerId;
           const duplicate = await tx.clients.findByNormalizedPhone(phone);
           if (duplicate) throw new HttpError(409, duplicate.archivedAt ? "Клиент с таким номером находится в архиве" : "Клиент с таким номером телефона уже существует", { clientId: duplicate.id, archived: Boolean(duplicate.archivedAt) });
           const receipt=paymentValidation.value.receipt?await fileStorage.saveDataUrl(paymentValidation.value.receipt.dataUrl,paymentValidation.value.receipt.originalName):null;
           storedReceiptKey=receipt?.key||null;
-          const created = await tx.registerClientAndBookTrial({ clientId: makeId("cl"), trialId: makeId("trial"), actorUserId: actor.id, name, normalizedPhone: phone, originalPhone: input.phone, managerId, closerId: input.closerId, statusId, leadSourceId: input.leadSourceId || null, tagIds: input.tagIds || [], registrationComment: input.comment || "", slotId: input.slotId,trialType:paymentValidation.value.trialType,trialAmount:paymentValidation.value.trialAmount,trialPaymentDate:paymentValidation.value.trialType==="PAID"?now().slice(0,10):null,registeredByUserId:actor.id,receiptStorageKey:receipt?.key||null,receiptOriginalName:receipt?.originalName||null,receiptMimeType:receipt?.mimeType||null,receiptSizeBytes:receipt?.sizeBytes||null,receiptUploadedAt:receipt?.uploadedAt||null });
+          const common={clientId:makeId("cl"),trialId:makeId("trial"),actorUserId:actor.id,name,normalizedPhone:phone,originalPhone:input.phone,managerId,closerId:input.closerId||null,statusId,leadSourceId:input.leadSourceId||null,tagIds:input.tagIds||[],registrationComment:input.comment||"",slotId:input.slotId||null,trialType:paymentValidation.value.trialType,trialAmount:paymentValidation.value.trialAmount,trialPaymentDate:paymentValidation.value.trialType==="PAID"?now().slice(0,10):null,registeredByUserId:actor.id,receiptStorageKey:receipt?.key||null,receiptOriginalName:receipt?.originalName||null,receiptMimeType:receipt?.mimeType||null,receiptSizeBytes:receipt?.sizeBytes||null,receiptUploadedAt:receipt?.uploadedAt||null,preferredTimeText:String(input.preferredTimeText||"").trim(),preferredDate:input.preferredDate||null,preferredStartTime:input.preferredStartTime||null,preferredEndTime:input.preferredEndTime||null};
+          const created=unassigned?await tx.registerClientUnassignedTrial(common):await tx.registerClientAndBookTrial(common);
           return { status: 201, body: await enrichedClient(tx, created.client.id, actor, archiveReasons) };
+        }
+
+        const assignment=url.pathname.match(/^\/api\/trials\/([^/]+)\/(assign|reassign)$/);
+        if(req.method==="POST"&&assignment){
+          const trialId=assignment[1],action=assignment[2];requirePermission(actor,action==="assign"?"schedule.assignUnassigned":"schedule.reassignCloser");
+          const locked=(await tx.db.query("SELECT * FROM trials WHERE id=$1 AND active FOR UPDATE",[trialId])).rows[0];if(!locked)throw new HttpError(404,"Активный пробный не найден");
+          if(action==="assign"&&locked.assignment_state!=="UNASSIGNED")throw new HttpError(409,"Пробный уже назначен. Обновите данные");
+          if(action==="reassign"&&locked.assignment_state!=="SCHEDULED")throw new HttpError(409,"Пробный ещё не назначен");
+          if(input.version!==undefined&&Number(input.version)!==Number(locked.assignment_version))throw new HttpError(409,"Назначение уже изменилось. Обновите данные");
+          const client=await lockClient(tx,locked.client_id);if(!(await clientMatchesScope(tx,actor,client,"clients")))throw new HttpError(404,"Клиент не найден");
+          const slot=await tx.availabilitySlots.lockById(input.slotId);if(!slot||slot.status!=="FREE")throw new HttpError(409,"Этот слот уже занят");
+          const changedAt=now(),oldValue={closerId:locked.closer_id,slotId:locked.slot_id,scheduledAt:locked.scheduled_at};
+          if(action==="reassign"&&locked.slot_id&&new Date(locked.scheduled_at)>new Date())await tx.db.query("UPDATE availability_slots SET status='FREE',booked_trial_id=NULL WHERE id=$1 AND booked_trial_id=$2",[locked.slot_id,trialId]);
+          await tx.db.query("UPDATE trials SET closer_id=$2,slot_id=$3,scheduled_at=$4,assignment_state='SCHEDULED',assigned_at=$5,assigned_by_user_id=$6,assignment_version=assignment_version+1,updated_at=$5 WHERE id=$1",[trialId,slot.closerId,slot.id,slot.startAt,changedAt,actor.id]);
+          await tx.db.query("UPDATE clients SET current_closer_id=$2,updated_at=$3 WHERE id=$1",[client.id,slot.closerId,changedAt]);
+          const newValue={closerId:slot.closerId,slotId:slot.id,scheduledAt:slot.startAt};const eventType=action==="assign"?"TRIAL_ASSIGNED":"TRIAL_ASSIGNMENT_CHANGED";
+          await appendHistory(tx,client.id,actor.id,eventType,oldValue,newValue,changedAt);await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"TRIAL",entityId:trialId,action:eventType,oldValue,newValue,createdAt:changedAt});await appendNotification(tx,slot.closerId,client.id,"TRIAL_ASSIGNED",`${client.name} · ${slot.startAt}`,trialId,changedAt);
+          return{status:200,body:await enrichedClient(tx,client.id,actor,archiveReasons)};
         }
 
         const clientMatch = url.pathname.match(/^\/api\/clients\/([^/]+)(?:\/(archive|restore|notes|reassign|status))?$/);

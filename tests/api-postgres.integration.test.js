@@ -56,6 +56,8 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   const slotDate=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Almaty"}).format(new Date(slot.startAt));
   result=await call("GET",`/api/schedule-board?date=${slotDate}`);assert.equal(result.response.status,200);assert.ok(result.body.closers.some((closer)=>closer.id==="usr_closer"));assert.equal(result.body.slots.find((item)=>item.id===slot.id).status,"FREE");
 
+  result=await call("POST","/api/clients",{name:"PG Unassigned Client",phone:"+77015556640",managerId:"usr_manager",statusId:"st_scheduled",assignmentMode:"LATER",preferredTimeText:"После 20:00",trialType:"FREE"});assert.equal(result.response.status,201);const unassignedClientId=result.body.id,unassignedTrial=result.body.activeTrial;assert.equal(unassignedTrial.assignmentState,"UNASSIGNED");assert.equal(unassignedTrial.slotId,null);result=await call("GET","/api/unassigned-trials");assert.equal(result.body.items.some(item=>item.id===unassignedTrial.id),true);result=await call("POST",`/api/trials/${unassignedTrial.id}/assign`,{slotId:slot.id,version:unassignedTrial.assignmentVersion});assert.equal(result.response.status,200);assert.equal(result.body.originalManagerId,"usr_manager");assert.equal((await call("GET","/api/unassigned-trials")).body.items.length,0);assert.equal((await call("DELETE",`/api/clients/${unassignedClientId}`,{confirmation:"УДАЛИТЬ"})).response.status,200);
+
   result=await call("POST","/api/clients",{name:"API PostgreSQL Client",phone:"+7 701 555 66 44",managerId:"usr_manager",closerId:"usr_closer",slotId:slot.id,statusId:"st_scheduled",leadSourceId:"src_1",tagIds:["tag_1"],trialType:"FREE"});
   progress("client");
   assert.equal(result.response.status,201);const clientId=result.body.id;

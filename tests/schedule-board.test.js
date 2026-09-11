@@ -24,3 +24,8 @@ test("day navigation crosses month boundaries without timezone drift",()=>{
   assert.equal(board.shiftDate("2026-09-30",1),"2026-10-01");
   assert.equal(board.shiftDate("2026-09-01",-1),"2026-08-31");
 });
+
+test("smart matching ranks matching preferred times first without inventing slots",()=>{
+  const items=[{id:"none",createdAt:"2026-09-01",preferredTimeText:"Только утром"},{id:"after",createdAt:"2026-09-02",preferredTimeText:"После 20:00"},{id:"range",createdAt:"2026-09-03",preferredTimeText:"19:00–21:00"}];
+  assert.deepEqual(board.rankUnassigned(items,"20:30").map(x=>x.id),["range","after","none"]);
+});
