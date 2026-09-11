@@ -12,6 +12,7 @@ x-app: &app
     HOST: 0.0.0.0
     PORT: 4173
     STORAGE_BACKEND: postgres
+    UPLOAD_DIR: /app/uploads
     TRUST_PROXY: "true"
   depends_on:
     db:
@@ -53,6 +54,7 @@ services:
       migrate:
         condition: service_completed_successfully
     expose: ["4173"]
+    volumes: ["receipt_files:/app/uploads"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4173/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -89,5 +91,6 @@ services:
 
 volumes:
   postgres_data:
+  receipt_files:
   caddy_data:
   caddy_config:

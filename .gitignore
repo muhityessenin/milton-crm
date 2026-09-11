@@ -13,6 +13,7 @@ backups/
 # Local CRM database and temporary storage (may contain client data)
 data/db.json
 data/*.tmp
+uploads/
 
 # Logs, coverage, and build output
 *.log

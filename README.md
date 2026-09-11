@@ -21,7 +21,7 @@ Demo accounts (all use password `demo123`):
 | Closer | `closer@milton.kz` |
 
 Storage is selected with `STORAGE_BACKEND`. Local demo mode uses the gitignored
-`data/db.json`; production uses PostgreSQL and requires migrations 001–004.
+`data/db.json`; production uses PostgreSQL and requires migrations 001–005.
 Delete the JSON file only when you explicitly want to restore the demo seed.
 
 ## Verification

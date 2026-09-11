@@ -13,7 +13,7 @@ ENV NODE_ENV=production \
     STORAGE_BACKEND=postgres
 
 WORKDIR /app
-RUN apk add --no-cache tini && chown node:node /app
+RUN apk add --no-cache tini && mkdir -p /app/uploads && chown -R node:node /app
 COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json server.js ./
 COPY --chown=node:node server ./server

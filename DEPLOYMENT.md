@@ -76,11 +76,13 @@ and configure it for the deploy user. Do not reuse the server-login private key.
 7. Waits for `/api/health` to become healthy.
 
 The app container runs as a non-root user with a read-only filesystem. Client
-data is stored in the named `postgres_data` volume, not in the app image.
+data is stored in the named `postgres_data` volume. Paid-trial receipt files are
+stored separately in the named `receipt_files` volume; PostgreSQL stores only
+their protected metadata/reference. Both volumes survive app rebuilds/restarts.
 
 ## Backups
 
-Create a verified custom-format backup:
+Create a verified PostgreSQL dump and matching encrypted-ready receipt archive:
 
 ```bash
 ./scripts/backup-postgres.sh
@@ -88,7 +90,9 @@ Create a verified custom-format backup:
 
 Schedule it as the deploy user, for example every night, and monitor its exit
 status. The default retention is 14 days. A backup on the same VPS is not enough:
-copy every successful dump to encrypted storage outside the VPS.
+copy both generated files (`.dump` and `.receipts.tar.gz`) to encrypted storage
+outside the VPS. Restore automatically uses the matching receipt archive when
+it is next to the selected dump.
 
 Test restoration periodically on a staging stack. Restoring production is
 destructive and therefore requires an explicit guard:

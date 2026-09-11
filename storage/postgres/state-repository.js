@@ -119,8 +119,10 @@ class PostgresStateRepository {
       id:"id", client_id:"clientId", manager_id:"managerId", closer_id:"closerId", slot_id:"slotId", scheduled_at:"scheduledAt",
       completed_at:"completedAt", status_at_booking_id:"statusAtBookingId", result_status_id:"resultStatusId", result_at:"resultAt",
       result_actor_user_id:"resultActorUserId", attendance_outcome:"attendanceOutcome", archive_interrupted_at:"archiveInterruptedAt",
-      active:"active", created_at:"createdAt", updated_at:"updatedAt",
-    }, { ...row, active:value(row,"active",true), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });}
+      active:"active", created_at:"createdAt", updated_at:"updatedAt", trial_type:"trialType", trial_amount:"trialAmount",
+      trial_payment_date:"trialPaymentDate", registered_by_user_id:"registeredByUserId", receipt_storage_key:"receiptStorageKey",
+      receipt_original_name:"receiptOriginalName", receipt_mime_type:"receiptMimeType", receipt_size_bytes:"receiptSizeBytes", receipt_uploaded_at:"receiptUploadedAt",
+    }, { ...row, active:value(row,"active",true), trialType:value(row,"trialType","FREE"), trialAmount:value(row,"trialAmount",0), registeredByUserId:value(row,"registeredByUserId",row.managerId), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });}
 
     for (const row of state.payments) await upsert(this.db, "payments", {
       id:"id", client_id:"clientId", manager_attribution_id:"managerAttributionId", closer_attribution_id:"closerAttributionId",

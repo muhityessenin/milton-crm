@@ -120,7 +120,7 @@ async function setup() {
 
 const slotId = (index) => `load_${runId}_slot_${index}`;
 const nextPhone = () => `+7777${String((phoneSequence += 1) % 10000000).padStart(7, "0")}`;
-const clientPayload = (name, slot, phone = nextPhone()) => ({ name: `${marker} ${name}`, phone, closerId, slotId: slot, statusId: "st_scheduled", leadSourceId: "src_1", tagIds: ["tag_1"], comment: marker });
+const clientPayload = (name, slot, phone = nextPhone()) => ({ name: `${marker} ${name}`, phone, closerId, slotId: slot, statusId: "st_scheduled", leadSourceId: "src_1", tagIds: ["tag_1"], comment: marker, trialType:"FREE" });
 
 async function deleteTempClients() {
   const client = await controlPool.connect();

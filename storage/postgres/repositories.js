@@ -224,8 +224,12 @@ class TrialsRepository extends SqlRepository {
       INSERT INTO public.trials (
         id, client_id, manager_id, closer_id, slot_id, scheduled_at, completed_at,
         status_at_booking_id, result_status_id, result_at, result_actor_user_id,
-        attendance_outcome, archive_interrupted_at, active, created_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,now()))
+        attendance_outcome, archive_interrupted_at, active, created_at,
+        trial_type, trial_amount, trial_payment_date, registered_by_user_id,
+        receipt_storage_key, receipt_original_name, receipt_mime_type,
+        receipt_size_bytes, receipt_uploaded_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,now()),
+        $16,$17,$18,$19,$20,$21,$22,$23,$24)
       RETURNING *
     `, [
       value.id, value.clientId, value.managerId, value.closerId, value.slotId,
@@ -233,6 +237,10 @@ class TrialsRepository extends SqlRepository {
       value.resultStatusId || null, value.resultAt || null, value.resultActorUserId || null,
       value.attendanceOutcome || null, value.archiveInterruptedAt || null,
       value.active !== false, value.createdAt || null,
+      value.trialType || "FREE", Number(value.trialAmount || 0), value.trialPaymentDate || null,
+      value.registeredByUserId || value.managerId, value.receiptStorageKey || null,
+      value.receiptOriginalName || null, value.receiptMimeType || null,
+      value.receiptSizeBytes || null, value.receiptUploadedAt || null,
     ]);
     return camelRow(result.rows[0]);
   }
