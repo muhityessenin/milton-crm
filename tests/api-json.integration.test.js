@@ -45,6 +45,8 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   result = await call("GET", "/api/bootstrap");
   const slot = result.body.dashboard ? (await call("GET", "/api/slots?closerId=usr_closer")).body.find((item) => item.status === "FREE") : null;
   assert.ok(slot);
+  const slotDate=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Almaty"}).format(new Date(slot.startAt));
+  result=await call("GET",`/api/schedule-board?date=${slotDate}`);assert.equal(result.response.status,200);assert.ok(result.body.closers.some((closer)=>closer.id==="usr_closer"));assert.ok(result.body.closers.every((closer)=>closer.active&&closer.role==="CLOSER"));assert.equal(result.body.slots.find((item)=>item.id===slot.id).status,"FREE");
 
   result = await call("POST", "/api/clients", { name:"Invalid paid",phone:"+77015554431",managerId:"usr_manager",closerId:"usr_closer",slotId:slot.id,statusId:"st_scheduled",trialType:"PAID",trialAmount:1500 });
   assert.equal(result.response.status,422);assert.match(result.body.error,/чек/);
@@ -54,12 +56,13 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
     closerId:"usr_closer", slotId:slot.id, statusId:"st_scheduled", leadSourceId:"src_1", tagIds:["tag_1"], trialType:"FREE",
   });
   assert.equal(result.response.status, 201); const clientId=result.body.id;
+  result=await call("GET",`/api/schedule-board?date=${slotDate}`);const boardBooked=result.body.slots.find((item)=>item.id===slot.id);assert.equal(boardBooked.status,"BOOKED");assert.equal(boardBooked.events[0].clientName,"API JSON Client");assert.equal(boardBooked.events[0].manager.id,"usr_manager");
   const realtimeChunk=await Promise.race([eventsReader.read(),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Realtime update timeout")),1500))]);const realtimeText=new TextDecoder().decode(realtimeChunk.value);assert.match(realtimeText,/event: invalidate/);assert.match(realtimeText,/clients/);assert.doesNotMatch(realtimeText,/API JSON Client|\+7701/);eventsAbort.abort();
   result=await call("POST","/api/clients",{name:"API JSON Client",phone:"+7 701 555 44 33",managerId:"usr_manager",closerId:"usr_closer",slotId:slot.id,statusId:"st_scheduled",trialType:"FREE"});assert.equal(result.response.status,409);assert.equal((await call("GET","/api/bootstrap")).body.clients.filter((item)=>item.id===clientId).length,1);
 
   result = await call("POST", `/api/clients/${clientId}/notes`, { text:"API storage note" });
   assert.equal(result.response.status, 201);
-  token="";result=await call("POST","/api/login",{login:"manager@milton.kz",password:"demo123"});assert.equal(result.response.status,200);const managerToken=result.body.token,managerAbort=new AbortController(),managerEvents=await fetch(`${base}/api/events`,{headers:{Authorization:`Bearer ${managerToken}`},signal:managerAbort.signal}),managerReader=managerEvents.body.getReader();await managerReader.read();token=closerToken;
+  token=closerToken;result=await call("GET",`/api/schedule-board?date=${slotDate}`);assert.deepEqual(result.body.closers.map((closer)=>closer.id),["usr_closer"]);token="";result=await call("POST","/api/login",{login:"manager@milton.kz",password:"demo123"});assert.equal(result.response.status,200);const managerToken=result.body.token,managerAbort=new AbortController(),managerEvents=await fetch(`${base}/api/events`,{headers:{Authorization:`Bearer ${managerToken}`},signal:managerAbort.signal}),managerReader=managerEvents.body.getReader();await managerReader.read();token=closerToken;
   result = await call("POST", `/api/clients/${clientId}/status`, { statusId:"st_payment", amount:50000, paymentMethodId:"method_1", paymentDate:"2026-09-02" });
   assert.equal(result.response.status, 200);
   const managerChange=await Promise.race([managerReader.read(),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Manager realtime timeout")),1500))]);assert.match(new TextDecoder().decode(managerChange.value),/payments|clients/);managerAbort.abort();token=managerToken;const managerDrawer=await call("GET",`/api/clients/${clientId}`);assert.equal(managerDrawer.body.client.currentStatusId,"st_payment");assert.equal(managerDrawer.body.payments.length,1);token=ownerToken;

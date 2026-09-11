@@ -336,6 +336,19 @@ function displayTrialStatus(trial) {
   if (status(trial.resultStatusId)?.actionType === "REQUIRE_PAYMENT") return "Чек";
   return defaultRussianNames[trial.resultStatusId] || status(trial.resultStatusId)?.name || "Завершён";
 }
+function permittedScheduleClosers(actor){
+  const mayViewOthers=hasPermission(actor,"schedule.viewOthers")||hasPermission(actor,"schedule.manageOthers");
+  return db.users.filter((account)=>account.active&&account.role==="CLOSER"&&(account.id===actor.id||(mayViewOthers&&userMatchesScope(actor,account.id,"schedule"))));
+}
+function scheduleSlotPayload(slot,actor){
+  const events=db.trials.filter((trial)=>trial.slotId===slot.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map((trial)=>{
+    const next=trial.attendanceOutcome==="RESCHEDULED"?db.trials.filter((candidate)=>candidate.clientId===trial.clientId&&candidate.id!==trial.id&&candidate.createdAt>=trial.resultAt).sort((a,b)=>a.createdAt.localeCompare(b.createdAt))[0]:null;
+    const visibleClient=client(trial.clientId),mayOpen=visibleClient&&canOpenClient(actor,visibleClient),manager=user(trial.managerId);
+    return{id:trial.id,clientId:mayOpen?trial.clientId:null,clientName:mayOpen?visibleClient.name:null,slotId:trial.slotId,scheduledAt:trial.scheduledAt,active:trial.active,resultStatusId:trial.resultStatusId||null,attendanceOutcome:trial.attendanceOutcome||null,statusName:displayTrialStatus(trial),manager:manager?publicUser(manager):null,rescheduledTo:next?{trialId:next.id,scheduledAt:next.scheduledAt}:null};
+  });
+  const booked=events.find((trial)=>trial.id===slot.bookedTrialId);
+  return{...slot,clientId:booked?.clientId||null,events};
+}
 function attendanceSummary(trials) {
   const scheduled=trials.length,noShow=trials.filter((trial)=>trialAttendanceOutcome(trial)==="NO_SHOW").length,rescheduled=trials.filter((trial)=>trialAttendanceOutcome(trial)==="RESCHEDULED").length,unresolvedOverdue=trials.filter((trial)=>trialAttendanceOutcome(trial)==="OVERDUE").length;
   const formulaReached=Math.max(0,scheduled-noShow-rescheduled),reached=Math.max(0,formulaReached-unresolvedOverdue),attendance=scheduled?reached/scheduled*100:0;
@@ -469,11 +482,19 @@ async function api(req, res, url) {
   if (req.method === "POST" && /^\/api\/admin\/users\/[^/]+\/restore$/.test(url.pathname)) { if(!requirePermission(res,actor,"users.archive"))return;const uid=url.pathname.split("/")[4],target=user(uid);if(!target)return fail(res,404,"Пользователь не найден");if(!db.roles.some((role)=>role.id===target.roleId&&role.active))return fail(res,422,"Перед восстановлением назначьте активную роль");const oldValue={active:target.active,archivedAt:target.archivedAt};target.active=true;target.archivedAt=null;target.updatedAt=now();audit(actor.id,"USER",target.id,"USER_RESTORED",oldValue,{active:true});saveDb();return json(res,200,publicUser(target)); }
   if (req.method === "POST" && /^\/api\/notifications\/[^/]+\/read$/.test(url.pathname)) {const target=db.notifications.find((n)=>n.id===url.pathname.split("/")[3]&&n.userId===actor.id);if(!target)return fail(res,404,"Уведомление не найдено");target.readAt=target.readAt||now();saveDb();return json(res,200,target);}
   if (req.method === "GET" && url.pathname === "/api/audit") { if(!requirePermission(res,actor,"audit.view"))return;return json(res,200,db.auditLogs.slice().reverse().map((entry)=>({...entry,actor:publicUser(user(entry.actorUserId))}))); }
+  if(req.method==="GET"&&url.pathname==="/api/schedule-board"){
+    if(!requirePermission(res,actor,"schedule.view"))return;
+    const date=/^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date")||"")?url.searchParams.get("date"):dayKey(now());
+    const closers=permittedScheduleClosers(actor),closerIds=new Set(closers.map((account)=>account.id));
+    const slots=db.availabilitySlots.filter((slot)=>closerIds.has(slot.closerId)&&dayKey(slot.startAt)===date).sort((a,b)=>a.startAt.localeCompare(b.startAt)).map((slot)=>scheduleSlotPayload(slot,actor));
+    return json(res,200,{date,closers:closers.map(publicUser),slots});
+  }
   if (req.method === "GET" && url.pathname === "/api/slots") {
     if (!requirePermission(res, actor, "schedule.view")) return;
     const closerId = url.searchParams.get("closerId"); const date = url.searchParams.get("date");
     if (closerId && closerId !== actor.id && ((!hasPermission(actor,"schedule.viewOthers") && !hasPermission(actor,"schedule.manageOthers")) || !userMatchesScope(actor,closerId,"schedule"))) return fail(res,403,"Нет доступа к расписанию другого сотрудника");
-    return json(res, 200, db.availabilitySlots.filter((s) => (!closerId || s.closerId === closerId) && (!date || dayKey(s.startAt) === date)).sort((a,b) => a.startAt.localeCompare(b.startAt)).map((s)=>{const events=db.trials.filter((t)=>t.slotId===s.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map((t)=>{const next=t.attendanceOutcome==="RESCHEDULED"?db.trials.filter((candidate)=>candidate.clientId===t.clientId&&candidate.id!==t.id&&candidate.createdAt>=t.resultAt).sort((a,b)=>a.createdAt.localeCompare(b.createdAt))[0]:null,visibleClient=client(t.clientId);return{id:t.id,clientId:visibleClient&&canOpenClient(actor,visibleClient)?t.clientId:null,slotId:t.slotId,scheduledAt:t.scheduledAt,active:t.active,resultStatusId:t.resultStatusId||null,attendanceOutcome:t.attendanceOutcome||null,statusName:displayTrialStatus(t),rescheduledTo:next?{trialId:next.id,scheduledAt:next.scheduledAt}:null}});const booked=events.find((t)=>t.id===s.bookedTrialId);return{...s,clientId:booked?.clientId||null,events};}));
+    const permittedIds=new Set(permittedScheduleClosers(actor).map((account)=>account.id));
+    return json(res,200,db.availabilitySlots.filter((slot)=>permittedIds.has(slot.closerId)&&(!closerId||slot.closerId===closerId)&&(!date||dayKey(slot.startAt)===date)).sort((a,b)=>a.startAt.localeCompare(b.startAt)).map((slot)=>scheduleSlotPayload(slot,actor)));
   }
   if (req.method === "POST" && url.pathname === "/api/clients") {
     if (!requirePermission(res, actor, "clients.create") || !requirePermission(res, actor, "schedule.scheduleTrial")) return;
