@@ -97,6 +97,7 @@ async function setup() {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('milton_crm_load_setup'))");
     const business = (await client.query("SELECT (SELECT count(*)::int FROM clients) clients,(SELECT count(*)::int FROM trials) trials,(SELECT count(*)::int FROM payments) payments")).rows[0];
     if (business.clients || business.trials || business.payments) throw new Error(`Load test requires empty business tables; found ${JSON.stringify(business)}`);
+    report.database.baselineConfiguration=(await client.query("SELECT (SELECT count(*)::int FROM availability_slots) slots,(SELECT count(*)::int FROM users WHERE NOT is_owner) employees,(SELECT count(*)::int FROM sessions) sessions,(SELECT count(*)::int FROM users WHERE is_owner) owners")).rows[0];
     const owner = (await client.query("SELECT password_hash FROM users WHERE id='usr_admin' AND is_owner AND active")).rows[0];
     if (!owner) throw new Error("Active seeded Owner usr_admin was not found");
     for (let i = 0; i < managerIds.length; i += 1) {
@@ -315,7 +316,8 @@ async function main() {
     await app.closeStorage().catch(() => {});
     await controlPool.end();
   }
-  const clean = report.cleanup && report.cleanup.clients === 0 && report.cleanup.trials === 0 && report.cleanup.payments === 0 && report.cleanup.slots === 0 && report.cleanup.employees === 0 && report.cleanup.sessions === 0 && report.cleanup.owners === 1;
+  const baseline=report.database.baselineConfiguration;
+  const clean = report.cleanup && baseline && report.cleanup.clients === 0 && report.cleanup.trials === 0 && report.cleanup.payments === 0 && report.cleanup.slots === baseline.slots && report.cleanup.employees === baseline.employees && report.cleanup.sessions === baseline.sessions && report.cleanup.owners === baseline.owners;
   if (!clean) throw new Error(`Database cleanup verification failed: ${JSON.stringify(report.cleanup)}`);
   console.log(JSON.stringify(report, null, 2));
 }
