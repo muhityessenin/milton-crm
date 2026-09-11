@@ -120,14 +120,15 @@ function isHandledRoute(method, pathname) {
 
 function databaseError(error) {
   if (error instanceof HttpError) return error;
-  if (["SLOT_UNAVAILABLE", "SLOT_CLOSER_MISMATCH"].includes(error.code)) return new HttpError(409, error.message);
-  if (error.code === "DUPLICATE_PHONE") return new HttpError(409, error.message, { clientId: error.clientId });
+  if (error.code === "SLOT_UNAVAILABLE") return new HttpError(409, "Этот слот уже занят. Выберите другое время.", { code:"SLOT_UNAVAILABLE" });
+  if (error.code === "SLOT_CLOSER_MISMATCH") return new HttpError(409, "Выбранное время относится к другому клоузеру. Выберите время заново.", { code:"SLOT_CLOSER_MISMATCH" });
+  if (error.code === "DUPLICATE_PHONE") return new HttpError(409, error.message, { code:"DUPLICATE_PHONE", clientId:error.clientId });
   if (["ALREADY_ARCHIVED", "CLIENT_ARCHIVED"].includes(error.code)) return new HttpError(409, error.message);
   if (["CLIENT_NOT_FOUND", "NOT_ARCHIVED"].includes(error.code)) return new HttpError(404, error.message);
   if (error.code === "ARCHIVE_REASON_REQUIRED") return new HttpError(422, error.message);
   if (error.code === "23505") {
     if (String(error.constraint).includes("normalized_phone")) return new HttpError(409, "Клиент с таким номером телефона уже существует");
-    if (String(error.constraint).includes("slot") || String(error.message).includes("slot")) return new HttpError(409, "Это время больше недоступно");
+    if (String(error.constraint).includes("slot") || String(error.message).includes("slot")) return new HttpError(409, "Этот слот уже занят. Выберите другое время.", { code:"SLOT_UNAVAILABLE" });
     if (String(error.constraint).includes("idempotency")) return new HttpError(409, "Повторный платёж уже обрабатывается");
     return new HttpError(409, "Такая запись уже существует");
   }
@@ -175,7 +176,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           const statusId = input.statusId || (await tx.db.query("SELECT id FROM statuses WHERE active ORDER BY sort_order,id LIMIT 1")).rows[0]?.id;
           const managerId = actor.role === "MANAGER" ? actor.id : input.managerId;
           const duplicate = await tx.clients.findByNormalizedPhone(phone);
-          if (duplicate) throw new HttpError(409, duplicate.archivedAt ? "Клиент с таким номером находится в архиве" : "Клиент с таким номером телефона уже существует", { clientId: duplicate.id, archived: Boolean(duplicate.archivedAt) });
+          if (duplicate) throw new HttpError(409, duplicate.archivedAt ? "Клиент с таким номером находится в архиве" : "Клиент с таким номером телефона уже существует", { code:"DUPLICATE_PHONE", clientId: duplicate.id, archived: Boolean(duplicate.archivedAt) });
           const receipt=paymentValidation.value.receipt?await fileStorage.saveDataUrl(paymentValidation.value.receipt.dataUrl,paymentValidation.value.receipt.originalName):null;
           storedReceiptKey=receipt?.key||null;
           const common={clientId:makeId("cl"),trialId:makeId("trial"),actorUserId:actor.id,name,normalizedPhone:phone,originalPhone:input.phone,managerId,closerId:input.closerId||null,statusId,leadSourceId:input.leadSourceId||null,tagIds:input.tagIds||[],registrationComment:input.comment||"",slotId:input.slotId||null,trialType:paymentValidation.value.trialType,trialAmount:paymentValidation.value.trialAmount,trialPaymentDate:paymentValidation.value.trialType==="PAID"?now().slice(0,10):null,registeredByUserId:actor.id,receiptStorageKey:receipt?.key||null,receiptOriginalName:receipt?.originalName||null,receiptMimeType:receipt?.mimeType||null,receiptSizeBytes:receipt?.sizeBytes||null,receiptUploadedAt:receipt?.uploadedAt||null,preferredTimeText:String(input.preferredTimeText||"").trim(),preferredDate:input.preferredDate||null,preferredStartTime:input.preferredStartTime||null,preferredEndTime:input.preferredEndTime||null};
@@ -339,7 +340,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
     } catch (rawError) {
       if(storedReceiptKey)await fileStorage.remove(storedReceiptKey).catch(()=>{});
       const error = databaseError(rawError);
-      if (error instanceof HttpError) sendJson(res, error.status, { error: error.message, details: error.details });
+      if (error instanceof HttpError) sendJson(res, error.status, { error:error.message, ...(error.details||{}), details:error.details });
       else throw error;
     }
     return true;

@@ -61,6 +61,9 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   result=await call("POST","/api/clients",{name:"API PostgreSQL Client",phone:"+7 701 555 66 44",managerId:"usr_manager",closerId:"usr_closer",slotId:slot.id,statusId:"st_scheduled",leadSourceId:"src_1",tagIds:["tag_1"],trialType:"FREE"});
   progress("client");
   assert.equal(result.response.status,201);const clientId=result.body.id;
+  assert.equal(result.body.activeTrial.slotId,slot.id);assert.equal(result.body.activeTrial.closerId,slot.closerId);assert.equal(result.body.activeTrial.scheduledAt,slot.startAt);
+  const otherFree=slots.find((item)=>item.id!==slot.id&&item.status==="FREE");assert.ok(otherFree);
+  result=await call("POST","/api/clients",{name:"Duplicate phone retry",phone:"+7 701 555 66 44",managerId:"usr_manager",closerId:"usr_closer",slotId:otherFree.id,statusId:"st_scheduled",trialType:"FREE"});assert.equal(result.response.status,409);assert.equal(result.body.code,"DUPLICATE_PHONE");assert.equal(result.body.clientId,clientId);assert.equal((await call("GET","/api/slots?closerId=usr_closer")).body.find((item)=>item.id===otherFree.id).status,"FREE");
   result=await call("GET",`/api/schedule-board?date=${slotDate}`);const boardSlot=result.body.slots.find((item)=>item.id===slot.id);assert.equal(boardSlot.status,"BOOKED");assert.equal(boardSlot.events[0].clientName,"API PostgreSQL Client");assert.equal(boardSlot.events[0].manager.id,"usr_manager");
   assert.equal((await call("GET",`/api/clients/${clientId}`)).response.status,200);
   assert.equal((await call("POST",`/api/clients/${clientId}/notes`,{text:"PostgreSQL API note"})).response.status,201);
