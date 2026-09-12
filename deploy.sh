@@ -20,13 +20,7 @@ git remote get-url origin >/dev/null 2>&1 || die "the Git remote 'origin' is not
 
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 ENV_FILE="${ENV_FILE:-.env.production}"
-if [[ -z "${COMPOSE_FILE:-}" ]]; then
-  if [[ "${ENABLE_CADDY:-true}" == "true" ]]; then
-    COMPOSE_FILE="compose.caddy.yaml"
-  else
-    COMPOSE_FILE="compose.yaml"
-  fi
-fi
+COMPOSE_FILE="${COMPOSE_FILE:-compose.yaml}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   die "missing $ENV_FILE. Copy .env.production.example and set the production passwords."

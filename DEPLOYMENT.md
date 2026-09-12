@@ -80,6 +80,31 @@ data is stored in the named `postgres_data` volume. Paid-trial receipt files are
 stored separately in the named `receipt_files` volume; PostgreSQL stores only
 their protected metadata/reference. Both volumes survive app rebuilds/restarts.
 
+## Owner publication panel
+
+Only the global Owner can see or call the publication panel. Add these values
+to the existing `.env.production` before rebuilding the app:
+
+```bash
+VPS_DEPLOY_HOST=YOUR_VPS_IP
+VPS_DEPLOY_PORT=22
+VPS_DEPLOY_USER=ubuntu
+VPS_DEPLOY_PASSWORD=YOUR_VPS_LOGIN_PASSWORD
+VPS_DEPLOY_HOST_FINGERPRINT=SHA256:YOUR_ED25519_HOST_FINGERPRINT
+VPS_DEPLOY_PATH=/opt/milton-crm
+```
+
+Read the VPS fingerprint on the VPS itself with:
+
+```bash
+sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}'
+```
+
+The backend verifies this fingerprint before sending the password. Clicking
+**Опубликовать** starts `COMPOSE_FILE=compose.yaml ./deploy.sh` as a detached
+job. Its status and log live under `/tmp/milton-crm-deployments`, so the browser
+can reconnect and keep polling after the app container recreates itself.
+
 ## Backups
 
 Create a verified PostgreSQL dump and matching encrypted-ready receipt archive:

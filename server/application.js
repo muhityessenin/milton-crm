@@ -14,6 +14,7 @@ const { LoginRateLimiter, clientIp } = require("./login-rate-limit");
 const { LocalFileStorage } = require("./file-storage");
 const { RealtimeHub, resourcesForMutation } = require("./realtime");
 const { validateTrialPayment } = require("./trial-registration");
+const { createVpsDeploymentService, DeploymentError } = require("./vps-deployment");
 
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || "127.0.0.1";
@@ -180,6 +181,7 @@ let runtimeStorage = STORAGE_CONFIG.backend === "postgres"
     })
   : jsonStorage;
 let postgresWriteHandler;
+let vpsDeploymentService=createVpsDeploymentService();
 let fallbackDb = STORAGE_CONFIG.backend === "json" ? jsonStorage.load() : null;
 const activeState = () => requestState.getStore()?.state || fallbackDb;
 const activeStorage = () => requestState.getStore()?.storage || runtimeStorage;
@@ -194,6 +196,7 @@ function setStorageForTests(next) {
   runtimeStorage = next;
   if (postgresWriteHandler) postgresWriteHandler=createPostgresWriteHandler({storage:runtimeStorage,readBody:body,sendJson,normalizePhone,archiveReasons:CLIENT_ARCHIVE_REASONS,hashPassword,validImageData,fileStorage,validateTrialPayment});
 }
+function setVpsDeploymentServiceForTests(next) { vpsDeploymentService=next; }
 function saveDb() {
   const context=requestState.getStore();
   if(context){context.dirty=true;return;}
@@ -395,6 +398,20 @@ async function api(req, res, url) {
   }
   const actor = await actorFrom(req);
   if (!actor) return fail(res, 401, "Требуется авторизация");
+  if (url.pathname === "/api/admin/deployment" || /^\/api\/admin\/deployment\/[a-f0-9]{32}$/.test(url.pathname)) {
+    if(!actor.isOwner)return fail(res,403,"Публикация доступна только глобальному владельцу");
+    try{
+      if(req.method==="GET"&&url.pathname==="/api/admin/deployment")return json(res,200,vpsDeploymentService.describe());
+      if(req.method==="POST"&&url.pathname==="/api/admin/deployment"){
+        const result=await vpsDeploymentService.start();audit(actor.id,"SYSTEM",result.jobId,"DEPLOYMENT_STARTED",null,{host:vpsDeploymentService.describe().host});saveDb();return json(res,202,result);
+      }
+      if(req.method==="GET")return json(res,200,await vpsDeploymentService.status(url.pathname.split("/").pop()));
+      return fail(res,405,"Метод не поддерживается");
+    }catch(error){
+      if(error instanceof DeploymentError||error?.statusCode)return fail(res,error.statusCode||502,error.message);
+      throw error;
+    }
+  }
   if (req.method === "GET" && url.pathname === "/api/events") return realtimeHub.connect(req,res,actor.id);
   if (req.method === "GET" && /^\/api\/trials\/[^/]+\/receipt$/.test(url.pathname)) {
     const trialId=url.pathname.split("/")[3],trial=db.trials.find((item)=>item.id===trialId),c=trial&&client(trial.clientId);
@@ -673,4 +690,4 @@ async function run(){
   for(const signal of ["SIGINT","SIGTERM"])process.once(signal,()=>shutdown(signal).then(()=>process.exit(0)).catch((error)=>{console.error(error);process.exit(1);}));
   return startServer().then(()=>console.log(`Milton CRM запущена: http://${HOST}:${PORT} · ${STORAGE_CONFIG.backend}`)).catch((error)=>{console.error(error);process.exitCode=1;});
 }
-module.exports={server,startServer,closeStorage,run,setStorageForTests,storageBackend:STORAGE_CONFIG.backend,normalizePhone,seedDatabase,defaultRoles,PERMISSION_KEYS,applyOverrides,analyticsFilters,analyticsReport,dayKey,setDbForTests};
+module.exports={server,startServer,closeStorage,run,setStorageForTests,setVpsDeploymentServiceForTests,storageBackend:STORAGE_CONFIG.backend,normalizePhone,seedDatabase,defaultRoles,PERMISSION_KEYS,applyOverrides,analyticsFilters,analyticsReport,dayKey,setDbForTests};
