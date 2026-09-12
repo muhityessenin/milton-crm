@@ -62,10 +62,10 @@ class PostgresStorage {
   async assertSchema() {
     const result = await this.db.query(`
       SELECT version FROM public.schema_migrations
-      WHERE version IN ('001', '002', '003', '004', '005', '006') ORDER BY version
+      WHERE version IN ('001', '002', '003', '004', '005', '006', '007') ORDER BY version
     `);
-    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006") {
-      throw new Error("Milton PostgreSQL migrations 001 through 006 are required");
+    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007") {
+      throw new Error("Milton PostgreSQL migrations 001 through 007 are required");
     }
   }
 

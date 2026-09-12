@@ -11,7 +11,8 @@ These migrations support the PostgreSQL HTTP backend. They do not import
 4. `004_concurrency_and_idempotency.sql` adds optimistic row versions and payment idempotency protection.
 5. `005_realtime_trial_receipts_and_schedule.sql` adds trial-payment metadata, persistent receipt references, historical occupied slots, and commit-safe PostgreSQL change notifications.
 6. `006_unassigned_trials.sql` adds an explicit unassigned trial state, preferred-time fields, assignment concurrency versioning, reminder configuration, and assignment permissions without adding a CRM status.
-6. `tests/verify_schema.sql` validates the catalog and exercises critical constraints inside a transaction that is always rolled back.
+7. `007_closer_availability_management.sql` adds an optional per-Closer trial duration with a backward-compatible null/default fallback.
+8. `tests/verify_schema.sql` validates the catalog and exercises critical constraints inside a transaction that is always rolled back.
 
 ## Application requirements for the future cutover
 
