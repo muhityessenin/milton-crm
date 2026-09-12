@@ -22,8 +22,8 @@ BEGIN
   END IF;
 
   SELECT count(*) INTO permission_count FROM public.permissions;
-  IF permission_count <> 42 THEN
-    RAISE EXCEPTION 'Expected 42 permission definitions, found %', permission_count;
+  IF permission_count <> 44 THEN
+    RAISE EXCEPTION 'Expected 44 permission definitions, found %', permission_count;
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '001')
@@ -31,8 +31,9 @@ BEGIN
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '003')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '004')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '005')
-    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '006') THEN
-    RAISE EXCEPTION 'Expected schema migration versions 001 through 006';
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '006')
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '007') THEN
+    RAISE EXCEPTION 'Expected schema migration versions 001 through 007';
   END IF;
 END;
 $$;
@@ -89,6 +90,13 @@ BEGIN
     OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='trials' AND column_name='receipt_storage_key') THEN
     RAISE EXCEPTION 'Missing paid-trial receipt metadata columns';
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='users' AND column_name='trial_duration_minutes'
+  ) THEN
+    RAISE EXCEPTION 'Missing optional per-Closer trial duration column';
+  END IF;
 END;
 $$;
 
@@ -110,6 +118,19 @@ INSERT INTO public.users (
   ('test_owner', 'Test Admin', 'owner.schema.test@milton.local', 'test-hash', 'test_role_admin', 'ADMIN', false),
   ('test_manager', 'Test Manager', 'manager.schema.test@milton.local', 'test-hash', 'test_role_manager', 'MANAGER', false),
   ('test_closer', 'Test Closer', 'closer.schema.test@milton.local', 'test-hash', 'test_role_closer', 'CLOSER', false);
+
+UPDATE public.users SET trial_duration_minutes = 40 WHERE id = 'test_closer';
+
+DO $$
+BEGIN
+  BEGIN
+    UPDATE public.users SET trial_duration_minutes = 9 WHERE id = 'test_closer';
+    RAISE EXCEPTION 'Invalid Closer duration was not rejected';
+  EXCEPTION
+    WHEN check_violation THEN NULL;
+  END;
+END;
+$$;
 
 INSERT INTO public.user_permission_overrides (user_id, permission_key, enabled)
 VALUES ('test_manager', 'clients.archive', true);

@@ -36,6 +36,8 @@ test("PostgreSQL repositories preserve CRM shapes and transactional workflows", 
           ('repo_manager', 'Repository Manager', 'repo.manager@milton.local', 'hash', 'repo_role_manager', 'MANAGER', false),
           ('repo_closer', 'Repository Closer', 'repo.closer@milton.local', 'hash', 'repo_role_closer', 'CLOSER', false)
       `);
+      await tx.db.query("UPDATE public.users SET trial_duration_minutes=40 WHERE id='repo_closer'");
+      assert.equal((await tx.users.findById("repo_closer")).trialDurationMinutes,40);
       await tx.db.query(`
         INSERT INTO public.user_permission_overrides (user_id, permission_key, enabled)
         VALUES ('repo_manager', 'clients.archive', true)

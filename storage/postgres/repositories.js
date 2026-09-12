@@ -62,14 +62,14 @@ class UsersRepository extends SqlRepository {
     const result = await this.db.query(`
       INSERT INTO public.users (
         id, name, login, password_hash, role_id, business_role, is_owner,
-        avatar_url, profile_status, active, team_id, archived_at, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13,now()),COALESCE($14,now()))
+        avatar_url, profile_status, active, team_id, archived_at, trial_duration_minutes, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,now()),COALESCE($15,now()))
       RETURNING *
     `, [
       value.id, value.name, value.login, value.passwordHash, value.roleId, value.role,
       Boolean(value.isOwner), value.avatarUrl || "", value.profileStatus || "WORKING",
       value.active !== false, value.teamId || null, value.archivedAt || null,
-      value.createdAt || null, value.updatedAt || null,
+      value.trialDurationMinutes || null, value.createdAt || null, value.updatedAt || null,
     ]);
     await this.replaceOverrides(value.id, value.permissionOverrides || {}, value.scopeOverrides || {});
     return mapUser(result.rows[0]);
@@ -290,6 +290,10 @@ class AvailabilitySlotsRepository extends SqlRepository {
       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,now())) RETURNING *
     `, [value.id, value.closerId, value.startAt, value.endAt, value.status || "FREE", value.bookedTrialId || null, value.createdAt || null]);
     return camelRow(result.rows[0]);
+  }
+  async hasTrialReferences(id) {
+    const result = await this.db.query("SELECT 1 FROM public.trials WHERE slot_id=$1 LIMIT 1", [id]);
+    return result.rowCount > 0;
   }
 }
 

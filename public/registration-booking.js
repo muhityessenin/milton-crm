@@ -34,5 +34,13 @@
     return { ...(error?.data?.details || {}), ...(error?.data || {}) };
   }
 
-  return { slotDate, isBookableSlot, reconcileSelection, createResponseGate, conflictDetails };
+  function registrationVisibility(mode, hasSelectedSlot, clientFieldsRevealed = false) {
+    const unassigned = mode === "LATER";
+    return {
+      showSchedule: !unassigned,
+      showClientFields: unassigned || Boolean(hasSelectedSlot) || Boolean(clientFieldsRevealed),
+    };
+  }
+
+  return { slotDate, isBookableSlot, reconcileSelection, createResponseGate, conflictDetails, registrationVisibility };
 });

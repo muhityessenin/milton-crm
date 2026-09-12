@@ -99,7 +99,7 @@ class PostgresStateRepository {
     for (const row of state.users) await upsert(this.db, "users", {
       id:"id", name:"name", login:"login", password_hash:"passwordHash", role_id:"roleId", business_role:"role",
       is_owner:"isOwner", avatar_url:"avatarUrl", profile_status:"profileStatus", active:"active", team_id:"teamId",
-      archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt",
+      archived_at:"archivedAt", trial_duration_minutes:"trialDurationMinutes", created_at:"createdAt", updated_at:"updatedAt",
     }, { ...row, isOwner:Boolean(row.isOwner), avatarUrl:value(row,"avatarUrl",""), profileStatus:value(row,"profileStatus","WORKING"), active:value(row,"active",true), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });
 
     for (const row of state.clients) await upsert(this.db, "clients", {

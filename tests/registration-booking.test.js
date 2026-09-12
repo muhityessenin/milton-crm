@@ -31,3 +31,13 @@ test("PostgreSQL conflict metadata remains readable in old and new response shap
   assert.equal(booking.conflictDetails({data:{details:{code:"SLOT_UNAVAILABLE"}}}).code,"SLOT_UNAVAILABLE");
   assert.equal(booking.conflictDetails({data:{code:"DUPLICATE_PHONE",clientId:"cl_1"}}).clientId,"cl_1");
 });
+
+test("registration is schedule-first but keeps revealed client fields during schedule changes", () => {
+  assert.deepEqual(booking.registrationVisibility("NOW", false, false), { showSchedule:true, showClientFields:false });
+  assert.deepEqual(booking.registrationVisibility("NOW", true, false), { showSchedule:true, showClientFields:true });
+  assert.deepEqual(booking.registrationVisibility("NOW", false, true), { showSchedule:true, showClientFields:true });
+});
+
+test("unassigned registration skips schedule and immediately shows client fields", () => {
+  assert.deepEqual(booking.registrationVisibility("LATER", false, false), { showSchedule:false, showClientFields:true });
+});

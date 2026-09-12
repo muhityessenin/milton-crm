@@ -190,6 +190,14 @@ async function runRaceTests(tokens) {
   if (rows.filter((row) => row.status === 201).length !== 1 || rows.filter((row) => row.status === 409).length !== 4) throw new Error("Same-slot booking rule failed under concurrency");
   await deleteTempClients();
 
+  rows = await Promise.all([
+    createClient(managers[0], "delete-book-race", slotId(21), nextPhone()),
+    request("delete-slot-race", closers[0], "DELETE", `/api/slots/${slotId(21)}`),
+  ]);
+  report.races.deleteWhileBooking = { ...summarize(rows), expected: "exactly one succeeds; booked trial is never deleted" };
+  if (rows.filter((row) => row.status >= 200 && row.status < 300).length !== 1 || rows.filter((row) => row.status === 409).length !== 1) throw new Error("Concurrent slot delete/booking rule failed");
+  await deleteTempClients();
+
   const sharedRow = await createClient(managers[0], "shared", slotId(30), nextPhone());
   const shared = expect(sharedRow, [201], "Shared client creation failed");
   rows = await Promise.all([

@@ -111,6 +111,7 @@ async function appendNotification(tx, userId, clientId, type, content, trialId =
 
 function isHandledRoute(method, pathname) {
   if ((method === "POST" && ["/api/clients", "/api/slots/generate"].includes(pathname)) || (method === "PUT" && ["/api/profile","/api/admin/unassigned-settings"].includes(pathname))) return true;
+  if (["PUT","DELETE"].includes(method) && /^\/api\/slots\/[^/]+$/.test(pathname)) return true;
   return (method === "POST" && /^\/api\/clients\/[^/]+\/(archive|restore|notes|reassign|status)$/.test(pathname))
     || (method === "POST" && /^\/api\/trials\/[^/]+\/(assign|reassign)$/.test(pathname))
     || (method === "DELETE" && /^\/api\/clients\/[^/]+$/.test(pathname))
@@ -128,6 +129,7 @@ function databaseError(error) {
   if (error.code === "ARCHIVE_REASON_REQUIRED") return new HttpError(422, error.message);
   if (error.code === "23505") {
     if (String(error.constraint).includes("normalized_phone")) return new HttpError(409, "Клиент с таким номером телефона уже существует");
+    if (String(error.constraint).includes("availability_slots_closer_id_start_at")) return new HttpError(409, "У клоузера уже есть слот на это время");
     if (String(error.constraint).includes("slot") || String(error.message).includes("slot")) return new HttpError(409, "Этот слот уже занят. Выберите другое время.", { code:"SLOT_UNAVAILABLE" });
     if (String(error.constraint).includes("idempotency")) return new HttpError(409, "Повторный платёж уже обрабатывается");
     return new HttpError(409, "Такая запись уже существует");
@@ -162,6 +164,23 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
         }
         if(req.method==="PUT"&&url.pathname==="/api/admin/unassigned-settings"){
           requirePermission(actor,"settings.manageBranding");const minutes=Number(input.minutes);if(!Number.isInteger(minutes)||minutes<0||minutes>10080)throw new HttpError(422,"Укажите порог от 0 до 10080 минут");await tx.db.query("UPDATE app_settings SET unassigned_trial_reminder_minutes=$1,updated_by_user_id=$2,updated_at=now() WHERE id='global'",[minutes,actor.id]);await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"SETTINGS",entityId:"unassigned-trials",action:"UNASSIGNED_REMINDER_CHANGED",oldValue:null,newValue:{minutes},createdAt:now()});return{status:200,body:{minutes}};
+        }
+
+        const slotRoute=url.pathname.match(/^\/api\/slots\/([^/]+)$/);
+        if(slotRoute&&["PUT","DELETE"].includes(req.method)){
+          const slot=await tx.availabilitySlots.lockById(slotRoute[1]);if(!slot)throw new HttpError(404,"Слот не найден");
+          const managesOther=slot.closerId!==actor.id;
+          if(managesOther){requirePermission(actor,"schedule.manageOthers");const owner=await tx.users.findById(slot.closerId),scope=scopeFor(actor,"schedule");if(scope!=="ALL"&&(scope!=="TEAM"||!actor.teamId||owner?.teamId!==actor.teamId))throw new HttpError(403,"Область данных не включает этого сотрудника");}
+          else requirePermission(actor,"schedule.editOwnAvailability");
+          if(new Date(slot.startAt)<=new Date())throw new HttpError(409,"Прошедший слот нельзя изменить или удалить");
+          if(slot.status!=="FREE"||slot.bookedTrialId)throw new HttpError(409,"На этот слот уже записан пробный урок");
+          if(await tx.availabilitySlots.hasTrialReferences(slot.id))throw new HttpError(409,"Слот содержит историю пробного урока и должен быть сохранён");
+          if(req.method==="DELETE"){
+            await tx.db.query("DELETE FROM availability_slots WHERE id=$1",[slot.id]);await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"AVAILABILITY_SLOT",entityId:slot.id,action:"AVAILABILITY_SLOT_DELETED",oldValue:slot,newValue:null,createdAt:now()});return{status:200,body:{id:slot.id,deleted:true}};
+          }
+          const date=String(input.date||"");const time=String(input.time||"");const duration=Number(input.durationMinutes);if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!/^\d{2}:\d{2}$/.test(time)||!Number.isInteger(duration)||duration<10||duration>180)throw new HttpError(422,"Укажите корректные дату, время и длительность от 10 до 180 минут");
+          const startAt=new Date(`${date}T${time}:00+05:00`);if(Number.isNaN(startAt.getTime())||startAt<=new Date())throw new HttpError(422,"Новый слот должен быть в будущем");const endAt=new Date(startAt.getTime()+duration*60000);await tx.db.query("SELECT id FROM users WHERE id=$1 FOR UPDATE",[slot.closerId]);const overlap=await tx.db.query("SELECT 1 FROM availability_slots WHERE id<>$1 AND closer_id=$2 AND start_at<$4 AND end_at>$3 LIMIT 1",[slot.id,slot.closerId,startAt.toISOString(),endAt.toISOString()]);if(overlap.rowCount)throw new HttpError(409,"Новое время пересекается с другим слотом клоузера");
+          const updated=(await tx.db.query("UPDATE availability_slots SET start_at=$2,end_at=$3 WHERE id=$1 RETURNING *",[slot.id,startAt.toISOString(),endAt.toISOString()])).rows[0];await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"AVAILABILITY_SLOT",entityId:slot.id,action:"AVAILABILITY_SLOT_UPDATED",oldValue:slot,newValue:camelRow(updated),createdAt:now()});return{status:200,body:camelRow(updated)};
         }
 
         if (req.method === "POST" && url.pathname === "/api/clients") {
@@ -321,17 +340,21 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
             if (scopeFor(actor, "schedule") !== "TEAM" || !actor.teamId || target?.teamId !== actor.teamId) throw new HttpError(403, "Область данных не включает этого сотрудника");
           }
           const closer = await tx.users.findById(requestedCloser); if (!closer?.active || closer.role !== "CLOSER") throw new HttpError(422, "Выберите активного клоузера");
-          const [sh, sm] = String(input.start || "").split(":").map(Number), [eh, em] = String(input.end || "").split(":").map(Number), interval = Number(input.interval);
+          await tx.db.query("SELECT id FROM users WHERE id=$1 FOR UPDATE",[closer.id]);
+          const [sh, sm] = String(input.start || "").split(":").map(Number), [eh, em] = String(input.end || "").split(":").map(Number), duration = Number(input.durationMinutes ?? input.interval ?? closer.trialDurationMinutes ?? 60);
           const validDate = /^\d{4}-\d{2}-\d{2}$/.test(String(input.date || "")), validClock = Number.isInteger(sh) && sh >= 0 && sh <= 23 && Number.isInteger(sm) && sm >= 0 && sm <= 59 && Number.isInteger(eh) && eh >= 0 && eh <= 23 && Number.isInteger(em) && em >= 0 && em <= 59;
-          if (!validDate || !validClock || ![30, 45, 60].includes(interval) || !(eh * 60 + em > sh * 60 + sm)) throw new HttpError(422, "Укажите корректную дату, диапазон времени и интервал");
+          if (!validDate || !validClock || !Number.isInteger(duration) || duration < 10 || duration > 180 || !(eh * 60 + em > sh * 60 + sm)) throw new HttpError(422, "Укажите корректную дату, диапазон времени и длительность от 10 до 180 минут");
+          if(Number(closer.trialDurationMinutes)!==duration)await tx.db.query("UPDATE users SET trial_duration_minutes=$2 WHERE id=$1",[closer.id,duration]);
           let cursor = sh * 60 + sm, created = 0;
-          while (cursor + interval <= eh * 60 + em) {
+          while (cursor + duration <= eh * 60 + em) {
             const hh = String(Math.floor(cursor / 60)).padStart(2, "0"), mm = String(cursor % 60).padStart(2, "0");
-            const startAt = new Date(`${input.date}T${hh}:${mm}:00+05:00`).toISOString(), endAt = new Date(new Date(startAt).getTime() + interval * 60000).toISOString();
+            const startAt = new Date(`${input.date}T${hh}:${mm}:00+05:00`).toISOString(), endAt = new Date(new Date(startAt).getTime() + duration * 60000).toISOString();
+            const overlap=await tx.db.query("SELECT 1 FROM availability_slots WHERE closer_id=$1 AND start_at<$3 AND end_at>$2 LIMIT 1",[requestedCloser,startAt,endAt]);
+            if(overlap.rowCount){cursor+=duration;continue;}
             const result = await tx.db.query("INSERT INTO availability_slots(id,closer_id,start_at,end_at,status) VALUES($1,$2,$3,$4,'FREE') ON CONFLICT(closer_id,start_at) DO NOTHING", [makeId("slot"), requestedCloser, startAt, endAt]);
-            created += result.rowCount; cursor += interval;
+            created += result.rowCount; cursor += duration;
           }
-          return { status: 201, body: { created } };
+          return { status: 201, body: { created,durationMinutes:duration } };
         }
         throw new Error("Matched PostgreSQL write route was not handled");
       });
