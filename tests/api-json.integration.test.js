@@ -38,10 +38,11 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   result = await call("POST", "/api/login", { login:"admin@milton.kz", password:"demo123" });
   assert.equal(result.response.status, 200); token = result.body.token;
   const ownerToken=token;result=await call("POST","/api/login",{login:"closer@milton.kz",password:"demo123"});assert.equal(result.response.status,200);const closerToken=result.body.token;token=ownerToken;
-  const deploymentJobId="a".repeat(32);setVpsDeploymentServiceForTests({describe:()=>({configured:true,missing:[],host:"203.0.113.10",port:22,username:"ubuntu",deployPath:"/opt/milton-crm"}),start:async()=>({jobId:deploymentJobId,state:"running"}),status:async(jobId)=>({jobId,state:"success",exitCode:0,output:"Deployment complete"})});
-  token=closerToken;result=await call("GET","/api/admin/deployment");assert.equal(result.response.status,403);
+  const deploymentJobId="a".repeat(32),deploymentCommit="b".repeat(40);let selectedDeploymentCommit=null;setVpsDeploymentServiceForTests({describe:()=>({configured:true,missing:[],host:"203.0.113.10",port:22,username:"ubuntu",deployPath:"/opt/milton-crm"}),listCommits:async()=>({branch:"main",commits:[{sha:deploymentCommit,shortSha:"bbbbbbb",committedAt:"2026-09-13T14:00:00+05:00",author:"Owner",subject:"Detailed deployment"}]}),start:async(commit)=>{selectedDeploymentCommit=commit;return {jobId:deploymentJobId,state:"running",commit};},status:async(jobId)=>({jobId,state:"success",exitCode:0,output:"Deployment complete"})});
+  token=closerToken;result=await call("GET","/api/admin/deployment");assert.equal(result.response.status,403);assert.equal((await call("GET","/api/admin/deployment/commits")).response.status,403);
   token=ownerToken;result=await call("GET","/api/admin/deployment");assert.equal(result.response.status,200);assert.equal(result.body.configured,true);assert.equal("password" in result.body,false);
-  result=await call("POST","/api/admin/deployment",{});assert.equal(result.response.status,202);assert.equal(result.body.jobId,deploymentJobId);
+  result=await call("GET","/api/admin/deployment/commits");assert.equal(result.response.status,200);assert.equal(result.body.commits[0].sha,deploymentCommit);
+  result=await call("POST","/api/admin/deployment",{commit:deploymentCommit});assert.equal(result.response.status,202);assert.equal(result.body.jobId,deploymentJobId);assert.equal(selectedDeploymentCommit,deploymentCommit);
   result=await call("GET",`/api/admin/deployment/${deploymentJobId}`);assert.equal(result.response.status,200);assert.equal(result.body.state,"success");assert.match(result.body.output,/Deployment complete/);
   const eventsAbort=new AbortController(),eventsResponse=await fetch(`${base}/api/events`,{headers:{Authorization:`Bearer ${closerToken}`},signal:eventsAbort.signal});assert.equal(eventsResponse.status,200);const eventsReader=eventsResponse.body.getReader();await eventsReader.read();
 

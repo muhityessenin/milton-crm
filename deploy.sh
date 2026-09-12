@@ -21,6 +21,7 @@ git remote get-url origin >/dev/null 2>&1 || die "the Git remote 'origin' is not
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 ENV_FILE="${ENV_FILE:-.env.production}"
 COMPOSE_FILE="${COMPOSE_FILE:-compose.yaml}"
+DEPLOY_COMMIT="${DEPLOY_COMMIT:-}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   die "missing $ENV_FILE. Copy .env.production.example and set the production passwords."
@@ -32,8 +33,24 @@ if [[ "$(git branch --show-current)" != "$DEPLOY_BRANCH" ]]; then
   git switch "$DEPLOY_BRANCH"
 fi
 
-echo "[1/4] Pulling origin/$DEPLOY_BRANCH"
+restore_checkout() {
+  if [[ "$(git branch --show-current)" != "$DEPLOY_BRANCH" ]]; then
+    git switch "$DEPLOY_BRANCH" >/dev/null
+  fi
+}
+trap restore_checkout EXIT
+
+echo "[1/4] Updating origin/$DEPLOY_BRANCH"
 git pull --ff-only origin "$DEPLOY_BRANCH" || die "git pull failed. Check the deploy key and remote branch."
+
+if [[ -n "$DEPLOY_COMMIT" ]]; then
+  [[ "$DEPLOY_COMMIT" =~ ^[a-f0-9]{40}$ ]] || die "DEPLOY_COMMIT must be a full 40-character lowercase Git SHA."
+  git cat-file -e "$DEPLOY_COMMIT^{commit}" 2>/dev/null || die "selected commit does not exist after updating origin/$DEPLOY_BRANCH."
+  git merge-base --is-ancestor "$DEPLOY_COMMIT" "origin/$DEPLOY_BRANCH" || die "selected commit does not belong to origin/$DEPLOY_BRANCH."
+  git cat-file -e "$DEPLOY_COMMIT:server/vps-deployment.js" 2>/dev/null || die "selected commit predates safe deployment status tracking."
+  echo "Deploying selected commit $DEPLOY_COMMIT"
+  git switch --detach "$DEPLOY_COMMIT"
+fi
 
 compose=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 

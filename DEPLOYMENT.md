@@ -105,6 +105,12 @@ The backend verifies this fingerprint before sending the password. Clicking
 job. Its status and log live under `/tmp/milton-crm-deployments`, so the browser
 can reconnect and keep polling after the app container recreates itself.
 
+**Детальный деплой** fetches up to 30 recent commits from `origin/main` and
+shows each commit's date, time, author, SHA, and message. The selected full SHA
+is validated on the backend and again on the VPS: it must be an ancestor of
+`origin/main`. `deploy.sh` temporarily checks out that commit, rebuilds the
+stack, and restores the server checkout to `main` when it finishes.
+
 ## Backups
 
 Create a verified PostgreSQL dump and matching encrypted-ready receipt archive:
@@ -144,11 +150,10 @@ Compose commands.
 
 ## Rollback
 
-Application rollback is a Git operation: check out a previously verified commit
-on `main` in the server checkout and run `./deploy.sh`. Database migrations
-are forward-only; create and copy a verified backup before every destructive
-future migration. The current migrations are additive and `deploy.sh` never
-deletes business data.
+Application rollback can be started from **Детальный деплой** by selecting a
+previously verified commit. Database migrations are forward-only; create and
+copy a verified backup before every destructive future migration. The current
+migrations are additive and `deploy.sh` never deletes business data.
 
 ## Capacity target
 

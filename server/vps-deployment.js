@@ -4,7 +4,9 @@ const crypto = require("node:crypto");
 const { Client } = require("ssh2");
 
 const JOB_ID_PATTERN = /^[a-f0-9]{32}$/;
+const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const DEFAULT_LOG_BYTES = 120_000;
+const DEFAULT_COMMIT_LIMIT = 30;
 
 class DeploymentError extends Error {
   constructor(message, statusCode = 502) {
@@ -95,13 +97,47 @@ function jobPaths(config, jobId) {
   };
 }
 
-function buildStartCommand(config, jobId) {
+function validateCommit(commit) {
+  if (commit === null || commit === undefined || commit === "") return null;
+  const normalized = String(commit).trim().toLowerCase();
+  if (!COMMIT_PATTERN.test(normalized)) throw new DeploymentError("Некорректный SHA коммита", 400);
+  return normalized;
+}
+
+function buildListCommitsCommand(config, limit = DEFAULT_COMMIT_LIMIT) {
+  const safeLimit = Math.min(Math.max(Number(limit) || DEFAULT_COMMIT_LIMIT, 1), 100);
+  return [
+    `cd ${shellQuote(config.deployPath)}`,
+    "git fetch origin main --quiet",
+    `for commit in $(git rev-list --max-count=${safeLimit} origin/main); do`,
+    "  if git cat-file -e \"$commit:server/vps-deployment.js\" 2>/dev/null; then",
+    "    git show -s --format='%H%x1f%cI%x1f%an%x1f%s%x1e' \"$commit\"",
+    "  fi",
+    "done",
+  ].join("\n");
+}
+
+function parseCommitsOutput(raw) {
+  return String(raw || "").split("\x1e").map((record) => record.trim()).filter(Boolean).map((record) => {
+    const [sha, committedAt, author, ...subjectParts] = record.split("\x1f");
+    if (!COMMIT_PATTERN.test(sha || "") || !committedAt || !author || !subjectParts.length) {
+      throw new DeploymentError("VPS вернул некорректный список коммитов");
+    }
+    return { sha, shortSha:sha.slice(0, 7), committedAt, author, subject:subjectParts.join("\x1f") };
+  });
+}
+
+function buildStartCommand(config, jobId, commit = null) {
   const files = jobPaths(config, jobId);
+  const selectedCommit = validateCommit(commit);
+  const deployCommand = selectedCommit
+    ? `DEPLOY_COMMIT=${selectedCommit} COMPOSE_FILE=compose.yaml ./deploy.sh`
+    : "COMPOSE_FILE=compose.yaml ./deploy.sh";
   const jobScript = [
     `exec 9>${shellQuote(files.lock)}`,
     `if ! flock -n 9; then echo "Другой деплой уже выполняется"; printf 'failed:75\\n' > ${shellQuote(files.status)}; exit 75; fi`,
     `cd ${shellQuote(config.deployPath)}`,
-    "COMPOSE_FILE=compose.yaml ./deploy.sh",
+    deployCommand,
     "code=$?",
     `if [ "$code" -eq 0 ]; then printf 'success:0\\n' > ${shellQuote(files.status)}; else printf 'failed:%s\\n' "$code" > ${shellQuote(files.status)}; fi`,
     "exit \"$code\"",
@@ -150,11 +186,16 @@ function createVpsDeploymentService(options = {}) {
       const { config, missing } = settings();
       return { configured:missing.length === 0, missing, host:config.host || null, port:config.port, username:config.username || null, deployPath:config.deployPath };
     },
-    async start() {
+    async listCommits() {
+      const config=readyConfig(),result=await executor(config,buildListCommitsCommand(config));
+      if(result.code!==0)throw new DeploymentError(result.stderr.trim()||result.stdout.trim()||"Не удалось получить список коммитов");
+      return {branch:"main",commits:parseCommitsOutput(result.stdout)};
+    },
+    async start(commit = null) {
       const config = readyConfig(),jobId=crypto.randomBytes(16).toString("hex");
-      const result=await executor(config,buildStartCommand(config,jobId));
+      const selectedCommit=validateCommit(commit),result=await executor(config,buildStartCommand(config,jobId,selectedCommit));
       if(result.code!==0||!result.stdout.includes("started"))throw new DeploymentError(result.stderr.trim()||result.stdout.trim()||"VPS не подтвердил запуск публикации");
-      return {jobId,state:"running"};
+      return {jobId,state:"running",commit:selectedCommit};
     },
     async status(jobId) {
       const config=readyConfig(),result=await executor(config,buildStatusCommand(config,jobId));
@@ -164,4 +205,4 @@ function createVpsDeploymentService(options = {}) {
   };
 }
 
-module.exports = { DeploymentError, createVpsDeploymentService, loadDeploymentConfig, fingerprintForHostKey, buildStartCommand, buildStatusCommand, parseStatusOutput };
+module.exports = { DeploymentError, createVpsDeploymentService, loadDeploymentConfig, fingerprintForHostKey, buildListCommitsCommand, parseCommitsOutput, buildStartCommand, buildStatusCommand, parseStatusOutput, validateCommit };

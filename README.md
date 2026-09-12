@@ -59,4 +59,5 @@ container and is served from the same origin as the API.
 The production stack runs the application and PostgreSQL in separate
 containers. On the first deployment it creates one Owner account from the
 `INITIAL_ADMIN_*` values in `.env.production`; further deployments never reset
-that account.
+that account. The Owner-only Admin panel can publish the latest `main` version
+or select a specific recent commit with its date, time, author, and message.

@@ -248,7 +248,7 @@ function paintDeploymentStatus(result){
   const box=document.querySelector('[data-deployment-status]');if(!box)return;
   const stateName=result.state||"idle",terminal=["success","failed"].includes(stateName);
   box.innerHTML=`<div class="deployment-status-head"><span class="deployment-dot ${escapeHtml(stateName)}"></span><div><b>${escapeHtml(deploymentStateLabel(stateName))}</b><small>${result.exitCode===null||result.exitCode===undefined?'':`Код завершения: ${escapeHtml(result.exitCode)}`}</small></div></div><pre class="deployment-log">${escapeHtml(result.output||'Лог появится после запуска публикации.')}</pre>`;
-  const button=document.querySelector('[data-start-deployment]');if(button){button.disabled=stateName==="running"||stateName==="reconnecting";button.textContent=button.disabled?'Публикация…':'Опубликовать';}
+  document.querySelectorAll('[data-deployment-action]').forEach(button=>{button.disabled=stateName==="running"||stateName==="reconnecting";button.textContent=button.disabled?'Публикация…':button.dataset.idleLabel;});
   if(terminal){localStorage.removeItem('milton_deployment_job');state.deploymentJobId="";}
 }
 function pollDeployment(jobId){
@@ -265,18 +265,33 @@ function pollDeployment(jobId){
   };
   tick();
 }
+async function startDeployment(commit=null){
+  document.querySelectorAll('[data-deployment-action]').forEach(button=>button.disabled=true);
+  paintDeploymentStatus({state:'running',output:commit?`Подключение к VPS и подготовка коммита ${commit.slice(0,7)}…`:'Подключение к VPS и запуск deploy.sh…'});
+  try{const job=await request('/api/admin/deployment',{method:'POST',body:JSON.stringify({commit})});state.deploymentJobId=job.jobId;localStorage.setItem('milton_deployment_job',job.jobId);pollDeployment(job.jobId)}catch(error){paintDeploymentStatus({state:'failed',output:error.message});toast(error.message,true)}
+}
+async function showDetailedDeployment(){
+  const detailButton=document.querySelector('[data-detailed-deployment]');if(detailButton){detailButton.disabled=true;detailButton.textContent='Получаем коммиты…';}
+  try{
+    const result=await request('/api/admin/deployment/commits'),commits=result.commits||[];
+    if(!commits.length)throw new Error('В origin/main нет доступных для публикации коммитов');
+    showModal(`<h2>Детальный деплой</h2><p>Выберите конкретный коммит из <b>${escapeHtml(result.branch)}</b>. VPS проверит его принадлежность ветке перед публикацией.</p><form id="detailed-deployment-form"><div class="field"><label>Коммит</label><select name="commit" required>${commits.map((commit,index)=>`<option value="${escapeHtml(commit.sha)}" ${index===0?'selected':''}>${escapeHtml(dateTime(commit.committedAt))} · ${escapeHtml(commit.shortSha)} · ${escapeHtml(commit.subject)}</option>`).join('')}</select></div><div class="deployment-commit-details" data-commit-details></div><div class="permission-warning">Будет опубликована именно выбранная версия. Во время пересоздания контейнеров CRM может быть недоступна несколько секунд.</div><div class="modal-actions"><button type="button" class="btn btn-ghost" data-close-modal>Отмена</button><button class="btn btn-primary">Опубликовать выбранный</button></div></form>`);
+    const form=document.querySelector('#detailed-deployment-form'),details=form.querySelector('[data-commit-details]'),renderDetails=()=>{const commit=commits.find(item=>item.sha===form.commit.value);details.innerHTML=commit?`<code>${escapeHtml(commit.sha)}</code><span>${escapeHtml(commit.author)} · ${escapeHtml(dateTime(commit.committedAt))}</span><b>${escapeHtml(commit.subject)}</b>`:'';};
+    form.commit.onchange=renderDetails;renderDetails();form.onsubmit=async event=>{event.preventDefault();const commit=form.commit.value;if(!window.confirm(`Опубликовать коммит ${commit.slice(0,7)} на production-сервере?`))return;closeModal();await startDeployment(commit);};
+  }catch(error){toast(error.message,true)}finally{const button=document.querySelector('[data-detailed-deployment]');if(button&&!state.deploymentJobId){button.disabled=false;button.textContent=button.dataset.idleLabel;}}
+}
 async function renderSystemAdmin(outlet){
   if(!state.data.me.isOwner){state.page="dashboard";return renderShell();}
-  outlet.innerHTML=`${pageHead('Управление системой','Админ-панель','Публикация актуальной версии Milton CRM на production-сервер.')}<section class="deployment-card"><div class="deployment-copy"><span class="deployment-icon">⇧</span><div><h2>Production</h2><p>Сервер получит изменения из GitHub, выполнит миграции и пересоздаст контейнеры. Работа CRM может прерваться на короткое время.</p></div></div><div class="deployment-target" data-deployment-target><span class="spinner"></span></div><button class="btn btn-primary deployment-publish" data-start-deployment disabled>Опубликовать</button></section><section class="panel deployment-result" data-deployment-status><div class="deployment-status-head"><span class="deployment-dot idle"></span><div><b>Готово к публикации</b><small>Результат выполнения появится здесь</small></div></div><pre class="deployment-log">Лог появится после запуска публикации.</pre></section>`;
+  outlet.innerHTML=`${pageHead('Управление системой','Админ-панель','Публикация актуальной или выбранной версии Milton CRM на production-сервер.')}<section class="deployment-card"><div class="deployment-copy"><span class="deployment-icon">⇧</span><div><h2>Production</h2><p>Сервер получит изменения из GitHub, выполнит миграции и пересоздаст контейнеры. Работа CRM может прерваться на короткое время.</p></div></div><div class="deployment-target" data-deployment-target><span class="spinner"></span></div><div class="deployment-actions"><button class="btn btn-primary deployment-publish" data-deployment-action data-start-deployment data-idle-label="Опубликовать" disabled>Опубликовать</button><button class="btn deployment-detailed" data-deployment-action data-detailed-deployment data-idle-label="Детальный деплой" disabled>Детальный деплой</button></div></section><section class="panel deployment-result" data-deployment-status><div class="deployment-status-head"><span class="deployment-dot idle"></span><div><b>Готово к публикации</b><small>Результат выполнения появится здесь</small></div></div><pre class="deployment-log">Лог появится после запуска публикации.</pre></section>`;
   try{
-    const config=await request('/api/admin/deployment'),target=outlet.querySelector('[data-deployment-target]'),button=outlet.querySelector('[data-start-deployment]');
+    const config=await request('/api/admin/deployment'),target=outlet.querySelector('[data-deployment-target]'),button=outlet.querySelector('[data-start-deployment]'),detailButton=outlet.querySelector('[data-detailed-deployment]');
     target.innerHTML=config.configured?`<div><small>VPS</small><b>${escapeHtml(config.username)}@${escapeHtml(config.host)}:${escapeHtml(config.port)}</b></div><div><small>Проект</small><b>${escapeHtml(config.deployPath)}</b></div>`:`<div class="deployment-warning"><b>Подключение не настроено</b><span>Заполните в .env: ${escapeHtml(config.missing.join(', '))}</span></div>`;
-    button.disabled=!config.configured;
+    button.disabled=!config.configured||Boolean(state.deploymentJobId);detailButton.disabled=!config.configured||Boolean(state.deploymentJobId);
     button.onclick=async()=>{
       if(!window.confirm('Опубликовать текущую ветку main на production-сервере?'))return;
-      button.disabled=true;button.textContent='Запускаем…';paintDeploymentStatus({state:'running',output:'Подключение к VPS и запуск deploy.sh…'});
-      try{const job=await request('/api/admin/deployment',{method:'POST',body:'{}'});state.deploymentJobId=job.jobId;localStorage.setItem('milton_deployment_job',job.jobId);pollDeployment(job.jobId)}catch(error){paintDeploymentStatus({state:'failed',output:error.message});toast(error.message,true)}
+      await startDeployment();
     };
+    detailButton.onclick=showDetailedDeployment;
     if(state.deploymentJobId)pollDeployment(state.deploymentJobId);
   }catch(error){paintDeploymentStatus({state:'failed',output:error.message});toast(error.message,true)}
 }
