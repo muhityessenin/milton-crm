@@ -107,6 +107,7 @@ class PostgresStateRepository {
       original_manager_id:"originalManagerId", current_manager_id:"currentManagerId", current_closer_id:"currentCloserId",
       current_status_id:"currentStatusId", lead_source_id:"leadSourceId", registration_comment:"registrationComment",
       archived_at:"archivedAt", archived_by_user_id:"archivedByUserId", archive_reason:"archiveReason",
+      current_reason_id:"currentReasonId",
       permanently_deleted_at:"permanentlyDeletedAt", permanently_deleted_by_user_id:"permanentlyDeletedByUserId",
       created_at:"createdAt", updated_at:"updatedAt",
     }, { ...row, registrationComment:value(row,"registrationComment",""), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });
@@ -125,6 +126,9 @@ class PostgresStateRepository {
       assignment_state:"assignmentState", preferred_time_text:"preferredTimeText", preferred_date:"preferredDate",
       preferred_start_time:"preferredStartTime", preferred_end_time:"preferredEndTime", assigned_at:"assignedAt",
       assigned_by_user_id:"assignedByUserId", assignment_version:"assignmentVersion",
+      pending_reschedule:"pendingReschedule", reschedule_reason_id:"rescheduleReasonId",
+      reschedule_from_trial_id:"rescheduleFromTrialId", previous_closer_id:"previousCloserId",
+      pending_reschedule_at:"pendingRescheduleAt", pending_reschedule_by_user_id:"pendingRescheduleByUserId",
     }, { ...row, active:value(row,"active",true), trialType:value(row,"trialType","FREE"), trialAmount:value(row,"trialAmount",0), registeredByUserId:value(row,"registeredByUserId",row.managerId), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });}
 
     for (const row of state.payments) await upsert(this.db, "payments", {
@@ -140,8 +144,9 @@ class PostgresStateRepository {
       id:"id", client_id:"clientId", actor_user_id:"actorUserId", event_type:"eventType", old_value:"oldValue", new_value:"newValue", created_at:"createdAt",
     }, { ...row, createdAt:value(row,"createdAt",now) });
     for (const row of state.notifications) await upsert(this.db, "notifications", {
-      id:"id", user_id:"userId", client_id:"clientId", trial_id:"trialId", type:"type", content:"content", read_at:"readAt", created_at:"createdAt",
-    }, { ...row, createdAt:value(row,"createdAt",now) });
+      id:"id", user_id:"userId", client_id:"clientId", trial_id:"trialId", type:"type", content:"content", read_at:"readAt",
+      snoozed_until:"snoozedUntil", resolved_at:"resolvedAt", created_at:"createdAt", updated_at:"updatedAt",
+    }, { ...row, createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });
     for (const row of state.auditLogs) await upsert(this.db, "audit_logs", {
       id:"id", actor_user_id:"actorUserId", entity_type:"entityType", entity_id:"entityId", action:"action", old_value:"oldValue", new_value:"newValue", created_at:"createdAt",
     }, { ...row, createdAt:value(row,"createdAt",now) });

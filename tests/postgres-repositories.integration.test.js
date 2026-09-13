@@ -77,6 +77,8 @@ test("PostgreSQL repositories preserve CRM shapes and transactional workflows", 
       assert.equal((await tx.availabilitySlots.findById("repo_slot_1")).status, "FREE");
       assert.equal((await tx.availabilitySlots.findById("repo_slot_2")).status, "BOOKED");
       const trialHistory=await tx.trials.listByClient("repo_client");assert.equal(trialHistory.length,2);assert.equal(trialHistory.find((row)=>row.id==="repo_trial_1").attendanceOutcome,"RESCHEDULED");assert.equal(trialHistory.find((row)=>row.id==="repo_trial_2").trialType,"FREE");
+      const pending=await tx.rescheduleTrial({clientId:"repo_client",actorUserId:"repo_closer",statusId:"repo_status_reschedule",reasonId:"repo_reason",rescheduleMode:"LATER",trialId:"repo_trial_pending",historyId:"repo_hist_pending"});
+      assert.equal(pending.assignmentState,"UNASSIGNED");assert.equal(pending.pendingReschedule,true);assert.equal(pending.slotId,null);assert.equal(pending.rescheduleFromTrialId,"repo_trial_2");assert.equal((await tx.availabilitySlots.findById("repo_slot_2")).status,"FREE");const pendingNotification=(await tx.notifications.listForUser("repo_owner",50)).find(row=>row.trialId===pending.id&&row.type==="TRIAL_RESCHEDULE_PENDING");assert.ok(pendingNotification);const snoozed=await tx.notifications.snooze(pendingNotification.id,"repo_owner","2031-01-01T00:15:00.000Z");assert.equal(snoozed.resolvedAt,null);assert.ok(snoozed.snoozedUntil);assert.ok((await tx.notifications.resolveForTrial(pending.id,"TRIAL_RESCHEDULE_PENDING")).length>=1);
 
       const payment = await tx.recordPayment({
         paymentId: "repo_payment_1", historyId: "repo_hist_payment",

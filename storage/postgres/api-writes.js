@@ -78,7 +78,7 @@ async function enrichedClient(tx, clientId, viewer, archiveReasons) {
     SELECT c.*,
       COALESCE((SELECT jsonb_agg(ct.tag_id ORDER BY ct.tag_id) FROM client_tags ct WHERE ct.client_id=c.id),'[]') tag_ids,
       to_jsonb(manager_row) manager_row,to_jsonb(closer_row) closer_row,to_jsonb(original_manager_row) original_manager_row,to_jsonb(archived_by_row) archived_by_row,
-      to_jsonb(status_row) status_row,to_jsonb(source_row) source_row,
+      to_jsonb(status_row) status_row,to_jsonb(reason_row) reason_row,to_jsonb(source_row) source_row,
       (SELECT to_jsonb(t) FROM trials t WHERE t.client_id=c.id AND t.active LIMIT 1) active_trial_row,
       COALESCE((SELECT jsonb_agg(to_jsonb(tag_row) ORDER BY tag_row.id) FROM client_tags ct JOIN tags tag_row ON tag_row.id=ct.tag_id WHERE ct.client_id=c.id),'[]') tags_rows,
       CASE WHEN $2::boolean THEN COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.payment_date DESC,p.created_at DESC) FROM payments p WHERE p.client_id=c.id AND p.voided_at IS NULL),'[]') ELSE '[]'::jsonb END payments_rows
@@ -88,18 +88,19 @@ async function enrichedClient(tx, clientId, viewer, archiveReasons) {
     LEFT JOIN users original_manager_row ON original_manager_row.id=c.original_manager_id
     LEFT JOIN users archived_by_row ON archived_by_row.id=c.archived_by_user_id
     LEFT JOIN statuses status_row ON status_row.id=c.current_status_id
+    LEFT JOIN refusal_reasons reason_row ON reason_row.id=c.current_reason_id
     LEFT JOIN lead_sources source_row ON source_row.id=c.lead_source_id
     WHERE c.id=$1
   `, [clientId, canViewPayments]);
   if (!result.rowCount) return null;
   const raw = result.rows[0], client = camelRow(raw);
-  for (const key of ["managerRow", "closerRow", "originalManagerRow", "archivedByRow", "statusRow", "sourceRow", "activeTrialRow", "tagsRows", "paymentsRows"]) delete client[key];
+  for (const key of ["managerRow", "closerRow", "originalManagerRow", "archivedByRow", "statusRow", "reasonRow", "sourceRow", "activeTrialRow", "tagsRows", "paymentsRows"]) delete client[key];
   const manager = mapUser(raw.manager_row), closer = mapUser(raw.closer_row), originalManager = mapUser(raw.original_manager_row), archivedBy = mapUser(raw.archived_by_row);
-  const status = camelRow(raw.status_row), leadSource = camelRow(raw.source_row), activeTrial = camelRow(raw.active_trial_row);
+  const status = camelRow(raw.status_row), currentReason=camelRow(raw.reason_row), leadSource = camelRow(raw.source_row), activeTrial = camelRow(raw.active_trial_row);
   const tags = (raw.tags_rows || []).map(camelRow), payments = (raw.payments_rows || []).map(mapPayment);
   const activePayments = payments.filter((payment) => !payment.voidedAt);
   const overdue = activeTrial?.assignmentState!=="UNASSIGNED" && activeTrial?.scheduledAt && new Date(activeTrial.scheduledAt).getTime() + 3600000 < Date.now() && client.currentStatusId === activeTrial.statusAtBookingId;
-  return { ...client, manager: publicUser(manager), closer: publicUser(closer)||{id:null,name:"Без клоузера",role:"CLOSER",avatarUrl:""}, originalManager: publicUser(originalManager), archivedBy: publicUser(archivedBy), archiveReasonLabel: archiveReasons[client.archiveReason] || client.archiveReason || null, status, leadSource, tags, activeTrial, payments: activePayments, paymentTotal: activePayments.reduce((sum, payment) => sum + Number(payment.amount), 0), overdue: Boolean(overdue) };
+  return { ...client, manager: publicUser(manager), closer: publicUser(closer)||{id:null,name:"Без клоузера",role:"CLOSER",avatarUrl:""}, originalManager: publicUser(originalManager), archivedBy: publicUser(archivedBy), archiveReasonLabel: archiveReasons[client.archiveReason] || client.archiveReason || null, status,currentReason, leadSource, tags, activeTrial, payments: activePayments, paymentTotal: activePayments.reduce((sum, payment) => sum + Number(payment.amount), 0), overdue: Boolean(overdue) };
 }
 
 async function appendHistory(tx, clientId, actorId, eventType, oldValue, newValue, createdAt = now()) {
@@ -116,7 +117,7 @@ function isHandledRoute(method, pathname) {
     || (method === "POST" && /^\/api\/trials\/[^/]+\/(assign|reassign)$/.test(pathname))
     || (method === "DELETE" && /^\/api\/clients\/[^/]+$/.test(pathname))
     || (method === "POST" && /^\/api\/payments\/[^/]+\/correct$/.test(pathname))
-    || (method === "POST" && /^\/api\/notifications\/[^/]+\/read$/.test(pathname));
+    || (method === "POST" && /^\/api\/notifications\/[^/]+\/(read|snooze)$/.test(pathname));
 }
 
 function databaseError(error) {
@@ -188,7 +189,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           const paymentValidation = validateTrialPayment(input);
           if (paymentValidation.error) throw new HttpError(422, paymentValidation.error);
           const phone = normalizePhone(input.phone), name = String(input.name || "").trim();
-          const unassigned=input.assignmentMode==="LATER";
+          const unassigned=actor.role==="MANAGER"||input.assignmentMode==="LATER";
           if (!name || phone.length < 12 || (!unassigned&&(!input.closerId || !input.slotId))) throw new HttpError(422, unassigned?"Укажите имя и корректный телефон":"Укажите имя, корректный телефон, клоузера и свободное время");
           const closer = unassigned?null:await tx.users.findById(input.closerId);
           if (!unassigned&&(!closer?.active || closer.role !== "CLOSER")) throw new HttpError(422, "Выберите активного клоузера");
@@ -205,7 +206,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
 
         const assignment=url.pathname.match(/^\/api\/trials\/([^/]+)\/(assign|reassign)$/);
         if(req.method==="POST"&&assignment){
-          const trialId=assignment[1],action=assignment[2];requirePermission(actor,action==="assign"?"schedule.assignUnassigned":"schedule.reassignCloser");
+          const trialId=assignment[1],action=assignment[2];if(actor.role!=="ADMIN")throw new HttpError(403,"Назначать клоузера может только администратор");requirePermission(actor,action==="assign"?"schedule.assignUnassigned":"schedule.reassignCloser");
           const locked=(await tx.db.query("SELECT * FROM trials WHERE id=$1 AND active FOR UPDATE",[trialId])).rows[0];if(!locked)throw new HttpError(404,"Активный пробный не найден");
           if(action==="assign"&&locked.assignment_state!=="UNASSIGNED")throw new HttpError(409,"Пробный уже назначен. Обновите данные");
           if(action==="reassign"&&locked.assignment_state!=="SCHEDULED")throw new HttpError(409,"Пробный ещё не назначен");
@@ -214,9 +215,11 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           const slot=await tx.availabilitySlots.lockById(input.slotId);if(!slot||slot.status!=="FREE")throw new HttpError(409,"Этот слот уже занят");
           const changedAt=now(),oldValue={closerId:locked.closer_id,slotId:locked.slot_id,scheduledAt:locked.scheduled_at};
           if(action==="reassign"&&locked.slot_id&&new Date(locked.scheduled_at)>new Date())await tx.db.query("UPDATE availability_slots SET status='FREE',booked_trial_id=NULL WHERE id=$1 AND booked_trial_id=$2",[locked.slot_id,trialId]);
-          await tx.db.query("UPDATE trials SET closer_id=$2,slot_id=$3,scheduled_at=$4,assignment_state='SCHEDULED',assigned_at=$5,assigned_by_user_id=$6,assignment_version=assignment_version+1,updated_at=$5 WHERE id=$1",[trialId,slot.closerId,slot.id,slot.startAt,changedAt,actor.id]);
-          await tx.db.query("UPDATE clients SET current_closer_id=$2,updated_at=$3 WHERE id=$1",[client.id,slot.closerId,changedAt]);
-          const newValue={closerId:slot.closerId,slotId:slot.id,scheduledAt:slot.startAt};const eventType=action==="assign"?"TRIAL_ASSIGNED":"TRIAL_ASSIGNMENT_CHANGED";
+          const wasPending=Boolean(locked.pending_reschedule);
+          await tx.db.query("UPDATE trials SET closer_id=$2,slot_id=$3,scheduled_at=$4,assignment_state='SCHEDULED',assigned_at=$5,assigned_by_user_id=$6,assignment_version=assignment_version+1,pending_reschedule=false,updated_at=$5 WHERE id=$1",[trialId,slot.closerId,slot.id,slot.startAt,changedAt,actor.id]);
+          await tx.db.query("UPDATE clients SET current_closer_id=$2,current_status_id=CASE WHEN $4 THEN $5 ELSE current_status_id END,current_reason_id=CASE WHEN $4 THEN NULL ELSE current_reason_id END,updated_at=$3 WHERE id=$1",[client.id,slot.closerId,changedAt,wasPending,locked.status_at_booking_id]);
+          if(wasPending)await tx.notifications.resolveForTrial(trialId,"TRIAL_RESCHEDULE_PENDING",changedAt);
+          const newValue={closerId:slot.closerId,slotId:slot.id,scheduledAt:slot.startAt};const eventType=wasPending?"TRIAL_RESCHEDULE_TIME_ASSIGNED":action==="assign"?"TRIAL_ASSIGNED":"TRIAL_ASSIGNMENT_CHANGED";
           await appendHistory(tx,client.id,actor.id,eventType,oldValue,newValue,changedAt);await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"TRIAL",entityId:trialId,action:eventType,oldValue,newValue,createdAt:changedAt});await appendNotification(tx,slot.closerId,client.id,"TRIAL_ASSIGNED",`${client.name} · ${slot.startAt}`,trialId,changedAt);
           return{status:200,body:await enrichedClient(tx,client.id,actor,archiveReasons)};
         }
@@ -285,13 +288,14 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
             const status = await tx.statuses.findById(input.statusId);
             if (!status?.active) throw new HttpError(422, "Выберите активный статус");
             if (actor.role === "MANAGER" && !["REQUIRE_RESCHEDULE", "MARK_NO_SHOW"].includes(status.actionType)) throw new HttpError(403, "Этот статус может изменить только клоузер");
-            const missing = (status.requiredFields || []).filter((field) => input[field] === undefined || input[field] === null || input[field] === "");
+            const requiredFields=status.actionType==="REQUIRE_RESCHEDULE"?(input.rescheduleMode==="LATER"?["refusalReasonId"]:["refusalReasonId","newSlotId"]):(status.requiredFields||[]);
+            const missing = requiredFields.filter((field) => input[field] === undefined || input[field] === null || input[field] === "");
             if (missing.length) throw new HttpError(422, "Заполните все обязательные поля", missing);
-            if (status.actionType === "REQUIRE_REFUSAL_REASON") { const reason = await tx.refusalReasons.findById(input.refusalReasonId); if (!reason?.active) throw new HttpError(422, "Выберите активную причину отказа"); }
+            if (["REQUIRE_REFUSAL_REASON","REQUIRE_RESCHEDULE"].includes(status.actionType)) { const reason = await tx.refusalReasons.findById(input.refusalReasonId); if (!reason?.active) throw new HttpError(422, status.actionType==="REQUIRE_RESCHEDULE"?"Выберите причину переноса":"Выберите активную причину отказа"); }
             const changedAt = now(), oldStatusId = client.currentStatusId;
             if (status.actionType === "REQUIRE_RESCHEDULE") {
               requirePermission(actor, "schedule.rescheduleTrial");
-              await tx.rescheduleTrial({ clientId, actorUserId: actor.id, newSlotId: input.newSlotId, statusId: status.id, changedAt });
+              await tx.rescheduleTrial({ clientId, actorUserId: actor.id, newSlotId: input.newSlotId, statusId: status.id, reasonId:input.refusalReasonId,rescheduleMode:input.rescheduleMode==="LATER"?"LATER":"NOW",changedAt });
             } else {
               if (status.actionType === "REQUIRE_PAYMENT") {
                 requirePermission(actor, "payments.create");
@@ -302,6 +306,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
                 if (existing.rowCount) return { status: 200, body: await enrichedClient(tx, clientId, actor, archiveReasons) };
                 await tx.recordPayment({ paymentId: makeId("pay"), clientId, actorUserId: actor.id, closerAttributionId: actor.role === "CLOSER" ? actor.id : client.currentCloserId, amount, paymentMethodId: input.paymentMethodId, paymentDate, comment: input.paymentComment || "", statusId: status.id, idempotencyKey: key, createdAt: changedAt });
               } else await tx.clients.updateStatus(clientId, status.id);
+              await tx.db.query("UPDATE clients SET current_reason_id=$2,updated_at=$3 WHERE id=$1",[clientId,input.refusalReasonId||null,changedAt]);
               const activeTrial = await tx.trials.findActiveByClient(clientId, { forUpdate: true });
               if (activeTrial && status.id !== activeTrial.statusAtBookingId) await tx.trials.finish(activeTrial.id, { completedAt: changedAt, resultStatusId: status.id, resultAt: changedAt, resultActorUserId: actor.id, attendanceOutcome: status.actionType === "MARK_NO_SHOW" ? "NO_SHOW" : "REACHED" });
             }
@@ -330,6 +335,12 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           const updated = await tx.notifications.markRead(notification[1], actor.id);
           if (!updated) throw new HttpError(404, "Уведомление не найдено");
           return { status: 200, body: updated };
+        }
+        const snoozeNotification=url.pathname.match(/^\/api\/notifications\/([^/]+)\/snooze$/);
+        if(snoozeNotification){
+          const snoozedUntil=new Date(Date.now()+15*60000).toISOString(),updated=await tx.notifications.snooze(snoozeNotification[1],actor.id,snoozedUntil);
+          if(!updated)throw new HttpError(404,"Активное уведомление не найдено");
+          return{status:200,body:updated};
         }
 
         if (req.method === "POST" && url.pathname === "/api/slots/generate") {
