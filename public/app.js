@@ -297,19 +297,19 @@ function pollDeployment(jobId){
   };
   tick();
 }
-async function startDeployment(commit=null){
+async function startDeployment(version=null){
   document.querySelectorAll('[data-deployment-action]').forEach(button=>button.disabled=true);
-  paintDeploymentStatus({state:'running',output:commit?`Подключение к VPS и подготовка коммита ${commit.slice(0,7)}…`:'Подключение к VPS и запуск deploy.sh…'});
-  try{const job=await request('/api/admin/deployment',{method:'POST',body:JSON.stringify({commit})});state.deploymentJobId=job.jobId;localStorage.setItem('milton_deployment_job',job.jobId);pollDeployment(job.jobId)}catch(error){paintDeploymentStatus({state:'failed',output:error.message});toast(error.message,true)}
+  paintDeploymentStatus({state:'running',output:version?`Подключение к VPS и подготовка версии ${version}…`:'Подключение к VPS и запуск deploy.sh…'});
+  try{const job=await request('/api/admin/deployment',{method:'POST',body:JSON.stringify({version})});state.deploymentJobId=job.jobId;localStorage.setItem('milton_deployment_job',job.jobId);pollDeployment(job.jobId)}catch(error){paintDeploymentStatus({state:'failed',output:error.message});toast(error.message,true)}
 }
 async function showDetailedDeployment(){
-  const detailButton=document.querySelector('[data-detailed-deployment]');if(detailButton){detailButton.disabled=true;detailButton.textContent='Получаем коммиты…';}
+  const detailButton=document.querySelector('[data-detailed-deployment]');if(detailButton){detailButton.disabled=true;detailButton.textContent='Получаем версии…';}
   try{
-    const result=await request('/api/admin/deployment/commits'),commits=result.commits||[];
-    if(!commits.length)throw new Error('В origin/main нет доступных для публикации коммитов');
-    showModal(`<h2>Детальный деплой</h2><p>Выберите конкретный коммит из <b>${escapeHtml(result.branch)}</b>. VPS проверит его принадлежность ветке перед публикацией.</p><form id="detailed-deployment-form"><div class="field"><label>Коммит</label><select name="commit" required>${commits.map((commit,index)=>`<option value="${escapeHtml(commit.sha)}" ${index===0?'selected':''}>${escapeHtml(dateTime(commit.committedAt))} · ${escapeHtml(commit.shortSha)} · ${escapeHtml(commit.subject)}</option>`).join('')}</select></div><div class="deployment-commit-details" data-commit-details></div><div class="permission-warning">Будет опубликована именно выбранная версия. Во время пересоздания контейнеров CRM может быть недоступна несколько секунд.</div><div class="modal-actions"><button type="button" class="btn btn-ghost" data-close-modal>Отмена</button><button class="btn btn-primary">Опубликовать выбранный</button></div></form>`);
-    const form=document.querySelector('#detailed-deployment-form'),details=form.querySelector('[data-commit-details]'),renderDetails=()=>{const commit=commits.find(item=>item.sha===form.commit.value);details.innerHTML=commit?`<code>${escapeHtml(commit.sha)}</code><span>${escapeHtml(commit.author)} · ${escapeHtml(dateTime(commit.committedAt))}</span><b>${escapeHtml(commit.subject)}</b>`:'';};
-    form.commit.onchange=renderDetails;renderDetails();form.onsubmit=async event=>{event.preventDefault();const commit=form.commit.value;if(!window.confirm(`Опубликовать коммит ${commit.slice(0,7)} на production-сервере?`))return;closeModal();await startDeployment(commit);};
+    const result=await request('/api/admin/deployment/versions'),deployments=result.deployments||[];
+    if(!deployments.length)throw new Error('За последние 30 дней нет успешно поднятых версий');
+    showModal(`<h2>Детальный деплой</h2><p>Здесь показаны только версии, которые успешно прошли health-check и были подняты на production за последние <b>${escapeHtml(result.retentionDays||30)} дней</b>.</p><form id="detailed-deployment-form"><div class="field"><label>Версия приложения</label><select name="version" required>${deployments.map((deployment,index)=>`<option value="${deployment.version}" ${index===0?'selected':''}>Версия ${deployment.version} · ${escapeHtml(dateTime(deployment.deployedAt))}</option>`).join('')}</select></div><div class="deployment-commit-details" data-commit-details></div><div class="permission-warning">Проект будет поднят точно из коммита выбранной версии. База данных не откатывается; миграции остаются forward-only.</div><div class="modal-actions"><button type="button" class="btn btn-ghost" data-close-modal>Отмена</button><button class="btn btn-primary">Поднять выбранную версию</button></div></form>`);
+    const form=document.querySelector('#detailed-deployment-form'),details=form.querySelector('[data-commit-details]'),renderDetails=()=>{const deployment=deployments.find(item=>String(item.version)===form.version.value);details.innerHTML=deployment?`<b>Версия ${deployment.version}</b><span>Поднята: ${escapeHtml(dateTime(deployment.deployedAt))}</span><code>${escapeHtml(deployment.sha)}</code><span>${escapeHtml(deployment.author)} · коммит ${escapeHtml(dateTime(deployment.committedAt))}</span><strong>${escapeHtml(deployment.subject)}</strong>`:'';};
+    form.version.onchange=renderDetails;renderDetails();form.onsubmit=async event=>{event.preventDefault();const version=Number(form.version.value);if(!window.confirm(`Поднять версию ${version} на production-сервере?`))return;closeModal();await startDeployment(version);};
   }catch(error){toast(error.message,true)}finally{const button=document.querySelector('[data-detailed-deployment]');if(button&&!state.deploymentJobId){button.disabled=false;button.textContent=button.dataset.idleLabel;}}
 }
 async function renderSystemAdmin(outlet){

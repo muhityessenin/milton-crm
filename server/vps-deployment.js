@@ -6,7 +6,6 @@ const { Client } = require("ssh2");
 const JOB_ID_PATTERN = /^[a-f0-9]{32}$/;
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
 const DEFAULT_LOG_BYTES = 120_000;
-const DEFAULT_COMMIT_LIMIT = 30;
 
 class DeploymentError extends Error {
   constructor(message, statusCode = 502) {
@@ -30,6 +29,7 @@ function loadDeploymentConfig(env = process.env) {
     hostFingerprint: String(env.VPS_DEPLOY_HOST_FINGERPRINT || "").trim(),
     deployPath: String(env.VPS_DEPLOY_PATH || "/opt/milton-crm").trim(),
     jobDirectory: String(env.VPS_DEPLOY_JOB_DIR || "/tmp/milton-crm-deployments").trim(),
+    historyFile: String(env.VPS_DEPLOY_HISTORY_FILE || `${String(env.VPS_DEPLOY_PATH || "/opt/milton-crm").trim()}/.deployment-state/successful.tsv`).trim(),
   };
   const missing = [];
   if (!config.host) missing.push("VPS_DEPLOY_HOST");
@@ -39,6 +39,7 @@ function loadDeploymentConfig(env = process.env) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) missing.push("VPS_DEPLOY_PORT");
   if (!config.deployPath.startsWith("/") || /[\r\n\0]/.test(config.deployPath)) missing.push("VPS_DEPLOY_PATH");
   if (!config.jobDirectory.startsWith("/") || /[\r\n\0]/.test(config.jobDirectory)) missing.push("VPS_DEPLOY_JOB_DIR");
+  if (!config.historyFile.startsWith("/") || /[\r\n\0]/.test(config.historyFile)) missing.push("VPS_DEPLOY_HISTORY_FILE");
   return { config, missing: [...new Set(missing)] };
 }
 
@@ -104,35 +105,77 @@ function validateCommit(commit) {
   return normalized;
 }
 
-function buildListCommitsCommand(config, limit = DEFAULT_COMMIT_LIMIT) {
-  const safeLimit = Math.min(Math.max(Number(limit) || DEFAULT_COMMIT_LIMIT, 1), 100);
+function validateDeploymentVersion(version) {
+  if (version === null || version === undefined || version === "") return null;
+  const normalized = Number(version);
+  if (!Number.isSafeInteger(normalized) || normalized < 1) throw new DeploymentError("Некорректный номер версии", 400);
+  return normalized;
+}
+
+function buildListDeploymentsCommand(config) {
   return [
     `cd ${shellQuote(config.deployPath)}`,
-    "git fetch origin main --quiet",
-    `for commit in $(git rev-list --max-count=${safeLimit} origin/main); do`,
-    "  if git cat-file -e \"$commit:server/vps-deployment.js\" 2>/dev/null; then",
-    "    git show -s --format='%H%x1f%cI%x1f%an%x1f%s%x1e' \"$commit\"",
+    `history=${shellQuote(config.historyFile)}`,
+    "if [ ! -s \"$history\" ]; then",
+    "  install -d -m 700 \"$(dirname \"$history\")\"",
+    "  current_commit=$(git rev-parse HEAD)",
+    "  container_id=$(docker compose --env-file .env.production -f compose.yaml ps -q app 2>/dev/null || true)",
+    "  deployed_at=$(docker inspect --format '{{.State.StartedAt}}' \"$container_id\" 2>/dev/null || date -u +'%Y-%m-%dT%H:%M:%SZ')",
+    "  printf '1\\t%s\\t%s\\n' \"$deployed_at\" \"$current_commit\" > \"$history\"",
+    "  printf '1\\n' > \"$(dirname \"$history\")/last-version\"",
+    "  chmod 600 \"$history\" \"$(dirname \"$history\")/last-version\"",
+    "fi",
+    "cutoff=$(date -u -d '30 days ago' +%s)",
+    "tac \"$history\" | while IFS=\"$(printf '\\t')\" read -r version deployed_at commit; do",
+    "  deployed_epoch=$(date -u -d \"$deployed_at\" +%s 2>/dev/null || printf '0')",
+    "  [ \"$deployed_epoch\" -ge \"$cutoff\" ] || continue",
+    "  if git cat-file -e \"$commit^{commit}\" 2>/dev/null; then",
+    "    printf '%s\\x1f%s\\x1f%s\\x1f' \"$version\" \"$deployed_at\" \"$commit\"",
+    "    git show -s --format='%cI%x1f%an%x1f%s%x1e' \"$commit\"",
     "  fi",
     "done",
   ].join("\n");
 }
 
-function parseCommitsOutput(raw) {
+function parseDeploymentsOutput(raw) {
   return String(raw || "").split("\x1e").map((record) => record.trim()).filter(Boolean).map((record) => {
-    const [sha, committedAt, author, ...subjectParts] = record.split("\x1f");
-    if (!COMMIT_PATTERN.test(sha || "") || !committedAt || !author || !subjectParts.length) {
-      throw new DeploymentError("VPS вернул некорректный список коммитов");
+    const [versionRaw, deployedAt, sha, committedAt, author, ...subjectParts] = record.split("\x1f");
+    const version=validateDeploymentVersion(versionRaw);
+    if (!version || !COMMIT_PATTERN.test(sha || "") || !deployedAt || !committedAt || !author || !subjectParts.length) {
+      throw new DeploymentError("VPS вернул некорректный список версий");
     }
-    return { sha, shortSha:sha.slice(0, 7), committedAt, author, subject:subjectParts.join("\x1f") };
+    return { version, deployedAt, sha, shortSha:sha.slice(0, 7), committedAt, author, subject:subjectParts.join("\x1f") };
   });
 }
 
-function buildStartCommand(config, jobId, commit = null) {
+function buildResolveDeploymentCommand(config, version) {
+  const selectedVersion=validateDeploymentVersion(version);
+  return [
+    `history=${shellQuote(config.historyFile)}`,
+    "[ -f \"$history\" ] || exit 44",
+    `record=$(awk -F '\\t' -v wanted=${selectedVersion} '$1 == wanted { found = $0 } END { if (found) print found }' "$history")`,
+    "[ -n \"$record\" ] || exit 44",
+    "deployed_at=$(printf '%s\\n' \"$record\" | cut -f2)",
+    "commit=$(printf '%s\\n' \"$record\" | cut -f3)",
+    "cutoff=$(date -u -d '30 days ago' +%s)",
+    "deployed_epoch=$(date -u -d \"$deployed_at\" +%s 2>/dev/null || printf '0')",
+    "[ \"$deployed_epoch\" -ge \"$cutoff\" ] || exit 45",
+    `cd ${shellQuote(config.deployPath)}`,
+    "git cat-file -e \"$commit^{commit}\" 2>/dev/null || exit 46",
+    "printf '%s\\n' \"$commit\"",
+  ].join("\n");
+}
+
+function buildStartCommand(config, jobId, commit = null, version = null) {
   const files = jobPaths(config, jobId);
   const selectedCommit = validateCommit(commit);
+  const selectedVersion = validateDeploymentVersion(version);
+  if (selectedVersion && !selectedCommit) throw new DeploymentError("Для версии не указан SHA коммита", 400);
+  const historyDirectory=config.historyFile.slice(0,config.historyFile.lastIndexOf("/")) || "/";
+  const historyEnvironment=`DEPLOY_HISTORY_DIR=${shellQuote(historyDirectory)}`;
   const deployCommand = selectedCommit
-    ? `DEPLOY_COMMIT=${selectedCommit} COMPOSE_FILE=compose.yaml ./deploy.sh`
-    : "COMPOSE_FILE=compose.yaml ./deploy.sh";
+    ? `${historyEnvironment} DEPLOY_VERSION=${selectedVersion || ""} DEPLOY_COMMIT=${selectedCommit} COMPOSE_FILE=compose.yaml ./deploy.sh`
+    : `${historyEnvironment} COMPOSE_FILE=compose.yaml ./deploy.sh`;
   const jobScript = [
     `exec 9>${shellQuote(files.lock)}`,
     `if ! flock -n 9; then echo "Другой деплой уже выполняется"; printf 'failed:75\\n' > ${shellQuote(files.status)}; exit 75; fi`,
@@ -186,16 +229,24 @@ function createVpsDeploymentService(options = {}) {
       const { config, missing } = settings();
       return { configured:missing.length === 0, missing, host:config.host || null, port:config.port, username:config.username || null, deployPath:config.deployPath };
     },
-    async listCommits() {
-      const config=readyConfig(),result=await executor(config,buildListCommitsCommand(config));
-      if(result.code!==0)throw new DeploymentError(result.stderr.trim()||result.stdout.trim()||"Не удалось получить список коммитов");
-      return {branch:"main",commits:parseCommitsOutput(result.stdout)};
+    async listDeployments() {
+      const config=readyConfig(),result=await executor(config,buildListDeploymentsCommand(config));
+      if(result.code!==0)throw new DeploymentError(result.stderr.trim()||result.stdout.trim()||"Не удалось получить список версий");
+      return {retentionDays:30,deployments:parseDeploymentsOutput(result.stdout)};
     },
-    async start(commit = null) {
+    async start(version = null) {
       const config = readyConfig(),jobId=crypto.randomBytes(16).toString("hex");
-      const selectedCommit=validateCommit(commit),result=await executor(config,buildStartCommand(config,jobId,selectedCommit));
+      const selectedVersion=validateDeploymentVersion(version);let selectedCommit=null;
+      if(selectedVersion){
+        const resolved=await executor(config,buildResolveDeploymentCommand(config,selectedVersion));
+        if(resolved.code===44)throw new DeploymentError("Версия не найдена",404);
+        if(resolved.code===45)throw new DeploymentError("Версия старше 30 дней и больше недоступна",410);
+        if(resolved.code!==0)throw new DeploymentError(resolved.stderr.trim()||"Коммит выбранной версии недоступен на VPS");
+        selectedCommit=validateCommit(resolved.stdout.trim());
+      }
+      const result=await executor(config,buildStartCommand(config,jobId,selectedCommit,selectedVersion));
       if(result.code!==0||!result.stdout.includes("started"))throw new DeploymentError(result.stderr.trim()||result.stdout.trim()||"VPS не подтвердил запуск публикации");
-      return {jobId,state:"running",commit:selectedCommit};
+      return {jobId,state:"running",version:selectedVersion,commit:selectedCommit};
     },
     async status(jobId) {
       const config=readyConfig(),result=await executor(config,buildStatusCommand(config,jobId));
@@ -205,4 +256,4 @@ function createVpsDeploymentService(options = {}) {
   };
 }
 
-module.exports = { DeploymentError, createVpsDeploymentService, loadDeploymentConfig, fingerprintForHostKey, buildListCommitsCommand, parseCommitsOutput, buildStartCommand, buildStatusCommand, parseStatusOutput, validateCommit };
+module.exports = { DeploymentError, createVpsDeploymentService, loadDeploymentConfig, fingerprintForHostKey, buildListDeploymentsCommand, parseDeploymentsOutput, buildResolveDeploymentCommand, buildStartCommand, buildStatusCommand, parseStatusOutput, validateCommit, validateDeploymentVersion };

@@ -439,13 +439,13 @@ async function api(req, res, url) {
   }
   const actor = await actorFrom(req);
   if (!actor) return fail(res, 401, "Требуется авторизация");
-  if (url.pathname === "/api/admin/deployment" || url.pathname === "/api/admin/deployment/commits" || /^\/api\/admin\/deployment\/[a-f0-9]{32}$/.test(url.pathname)) {
+  if (url.pathname === "/api/admin/deployment" || url.pathname === "/api/admin/deployment/versions" || /^\/api\/admin\/deployment\/[a-f0-9]{32}$/.test(url.pathname)) {
     if(!actor.isOwner)return fail(res,403,"Публикация доступна только глобальному владельцу");
     try{
       if(req.method==="GET"&&url.pathname==="/api/admin/deployment")return json(res,200,vpsDeploymentService.describe());
-      if(req.method==="GET"&&url.pathname==="/api/admin/deployment/commits")return json(res,200,await vpsDeploymentService.listCommits());
+      if(req.method==="GET"&&url.pathname==="/api/admin/deployment/versions")return json(res,200,await vpsDeploymentService.listDeployments());
       if(req.method==="POST"&&url.pathname==="/api/admin/deployment"){
-        const input=await body(req),commit=String(input.commit||"").trim()||null,result=await vpsDeploymentService.start(commit);audit(actor.id,"SYSTEM",result.jobId,"DEPLOYMENT_STARTED",null,{host:vpsDeploymentService.describe().host,commit:result.commit});saveDb();return json(res,202,result);
+        const input=await body(req),version=input.version??null,result=await vpsDeploymentService.start(version);audit(actor.id,"SYSTEM",result.jobId,"DEPLOYMENT_STARTED",null,{host:vpsDeploymentService.describe().host,version:result.version,commit:result.commit});saveDb();return json(res,202,result);
       }
       if(req.method==="GET")return json(res,200,await vpsDeploymentService.status(url.pathname.split("/").pop()));
       return fail(res,405,"Метод не поддерживается");

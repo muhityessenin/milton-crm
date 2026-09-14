@@ -9,6 +9,7 @@ node_modules/
 backups/
 .pnpm-store/
 .git-history-backup-*/
+.deployment-state/
 
 # Local CRM database and temporary storage (may contain client data)
 data/db.json

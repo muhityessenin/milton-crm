@@ -118,11 +118,17 @@ The backend verifies this fingerprint before sending the password. Clicking
 job. Its status and log live under `/tmp/milton-crm-deployments`, so the browser
 can reconnect and keep polling after the app container recreates itself.
 
-**Детальный деплой** fetches up to 30 recent commits from `origin/main` and
-shows each commit's date, time, author, SHA, and message. The selected full SHA
-is validated on the backend and again on the VPS: it must be an ancestor of
-`origin/main`. `deploy.sh` temporarily checks out that commit, rebuilds the
-stack, and restores the server checkout to `main` when it finishes.
+**Детальный деплой** показывает только версии, которые действительно были
+подняты на production и успешно прошли application health-check за последние
+30 дней. После успешного запуска `deploy.sh` присваивает версии следующий номер
+и сохраняет номер, время и точный Git SHA в
+`.deployment-state/successful.tsv`. Неуспешные запуски в историю не попадают.
+
+При выборе версии backend повторно проверяет серверный журнал и передаёт её
+точный SHA в `deploy.sh` как `DEPLOY_COMMIT`. Скрипт временно переключается на
+этот commit, пересобирает stack, проверяет health-check и возвращает checkout на
+`main`. Записи старше 30 дней удаляются, но счётчик версий не сбрасывается.
+PostgreSQL при таком возврате не откатывается: миграции остаются forward-only.
 
 ## Backups
 
