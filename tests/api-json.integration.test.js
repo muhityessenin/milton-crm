@@ -17,6 +17,7 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   t.after(async () => {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
     await closeStorage();
+    fs.rmSync(directory,{recursive:true,force:true});
   });
   const base = `http://127.0.0.1:${server.address().port}`;
   let token = "";
@@ -34,20 +35,22 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   let result = await call("GET", "/api/health");
   assert.equal(result.response.status, 200);
   assert.deepEqual(result.body, { status:"ok", storage:"json" });
+  const staticResponse=await fetch(`${base}/app.js`,{headers:{"Accept-Encoding":"gzip"}});assert.equal(staticResponse.status,200);assert.equal(staticResponse.headers.get("content-encoding"),"gzip");assert.match(staticResponse.headers.get("cache-control"),/must-revalidate/);const staticEtag=staticResponse.headers.get("etag");await staticResponse.arrayBuffer();const cachedStatic=await fetch(`${base}/app.js`,{headers:{"If-None-Match":staticEtag}});assert.equal(cachedStatic.status,304);
 
   result = await call("POST", "/api/login", { login:"admin@milton.kz", password:"demo123" });
   assert.equal(result.response.status, 200); token = result.body.token;
   const ownerToken=token;result=await call("POST","/api/login",{login:"closer@milton.kz",password:"demo123"});assert.equal(result.response.status,200);const closerToken=result.body.token;token=ownerToken;
-  const deploymentJobId="a".repeat(32),deploymentCommit="b".repeat(40);let selectedDeploymentCommit=null;setVpsDeploymentServiceForTests({describe:()=>({configured:true,missing:[],host:"203.0.113.10",port:22,username:"ubuntu",deployPath:"/opt/milton-crm"}),listCommits:async()=>({branch:"main",commits:[{sha:deploymentCommit,shortSha:"bbbbbbb",committedAt:"2026-09-13T14:00:00+05:00",author:"Owner",subject:"Detailed deployment"}]}),start:async(commit)=>{selectedDeploymentCommit=commit;return {jobId:deploymentJobId,state:"running",commit};},status:async(jobId)=>({jobId,state:"success",exitCode:0,output:"Deployment complete"})});
-  token=closerToken;result=await call("GET","/api/admin/deployment");assert.equal(result.response.status,403);assert.equal((await call("GET","/api/admin/deployment/commits")).response.status,403);
+  const deploymentJobId="a".repeat(32),deploymentCommit="b".repeat(40);let selectedDeploymentVersion=null;setVpsDeploymentServiceForTests({describe:()=>({configured:true,missing:[],host:"203.0.113.10",port:22,username:"ubuntu",deployPath:"/opt/milton-crm"}),listDeployments:async()=>({retentionDays:30,deployments:[{version:22,deployedAt:"2026-09-14T15:00:00Z",sha:deploymentCommit,shortSha:"bbbbbbb",committedAt:"2026-09-13T14:00:00+05:00",author:"Owner",subject:"Detailed deployment"}]}),start:async(version)=>{selectedDeploymentVersion=version;return {jobId:deploymentJobId,state:"running",version,commit:deploymentCommit};},status:async(jobId)=>({jobId,state:"success",exitCode:0,output:"Deployment complete"})});
+  token=closerToken;result=await call("GET","/api/admin/deployment");assert.equal(result.response.status,403);assert.equal((await call("GET","/api/admin/deployment/versions")).response.status,403);
   token=ownerToken;result=await call("GET","/api/admin/deployment");assert.equal(result.response.status,200);assert.equal(result.body.configured,true);assert.equal("password" in result.body,false);
-  result=await call("GET","/api/admin/deployment/commits");assert.equal(result.response.status,200);assert.equal(result.body.commits[0].sha,deploymentCommit);
-  result=await call("POST","/api/admin/deployment",{commit:deploymentCommit});assert.equal(result.response.status,202);assert.equal(result.body.jobId,deploymentJobId);assert.equal(selectedDeploymentCommit,deploymentCommit);
+  result=await call("GET","/api/admin/deployment/versions");assert.equal(result.response.status,200);assert.equal(result.body.deployments[0].version,22);
+  result=await call("POST","/api/admin/deployment",{version:22});assert.equal(result.response.status,202);assert.equal(result.body.jobId,deploymentJobId);assert.equal(selectedDeploymentVersion,22);
   result=await call("GET",`/api/admin/deployment/${deploymentJobId}`);assert.equal(result.response.status,200);assert.equal(result.body.state,"success");assert.match(result.body.output,/Deployment complete/);
   const eventsAbort=new AbortController(),eventsResponse=await fetch(`${base}/api/events`,{headers:{Authorization:`Bearer ${closerToken}`},signal:eventsAbort.signal});assert.equal(eventsResponse.status,200);const eventsReader=eventsResponse.body.getReader();await eventsReader.read();
 
   result = await call("GET", "/api/bootstrap");
   assert.equal(result.response.status, 200);
+  assert.equal(result.response.headers.get("content-encoding"),"gzip");
   result=await call("GET","/api/sync?resources=notifications");assert.equal(result.response.status,200);assert.ok(Array.isArray(result.body.notifications));assert.equal("clients" in result.body,false);
   result = await call("GET", "/api/bootstrap");
   const slot = result.body.dashboard ? (await call("GET", "/api/slots?closerId=usr_closer")).body.find((item) => item.status === "FREE") : null;
@@ -110,9 +113,8 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   result = await call("POST", `/api/clients/${clientId}/restore`, {});
   assert.equal(result.response.status, 200);
 
-  result = await call("PUT", "/api/admin/branding", { companyName:"Milton", accentColor:"#3157D5", logoUrl:"" });
-  assert.equal(result.response.status, 200);
-  const avatarDataUrl="data:image/jpeg;base64,/9j/2Q==";result=await call("PUT","/api/profile",{avatarUrl:avatarDataUrl});assert.equal(result.response.status,200);assert.equal((await call("GET","/api/bootstrap")).body.me.avatarUrl,avatarDataUrl);
+  const logoDataUrl="data:image/png;base64,iVBORw0KGgo=";result = await call("PUT", "/api/admin/branding", { companyName:"Milton", accentColor:"#3157D5", logoUrl:logoDataUrl });assert.equal(result.response.status, 200);assert.match(result.body.logoUrl,/^\/api\/branding\/logo\?v=/);const logoResponse=await fetch(`${base}${result.body.logoUrl}`,{headers:{Authorization:`Bearer ${token}`}});assert.equal(logoResponse.status,200);assert.equal(logoResponse.headers.get("content-type"),"image/png");const logoEtag=logoResponse.headers.get("etag");await logoResponse.arrayBuffer();assert.equal((await fetch(`${base}${result.body.logoUrl}`,{headers:{Authorization:`Bearer ${token}`,"If-None-Match":logoEtag}})).status,304);result=await call("PUT","/api/admin/branding",{companyName:"Milton",accentColor:"#3157D5",logoUrl:""});assert.equal(result.response.status,200);
+  const avatarDataUrl="data:image/jpeg;base64,/9j/2Q==";result=await call("PUT","/api/profile",{avatarUrl:avatarDataUrl});assert.equal(result.response.status,200);const optimizedBootstrap=await call("GET","/api/bootstrap"),avatarUrl=optimizedBootstrap.body.me.avatarUrl;assert.match(avatarUrl,/^\/api\/users\/usr_admin\/avatar\?v=/);assert.equal(JSON.stringify(optimizedBootstrap.body).includes("data:image"),false);const avatarResponse=await fetch(`${base}${avatarUrl}`,{headers:{Authorization:`Bearer ${token}`}});assert.equal(avatarResponse.status,200);assert.equal(avatarResponse.headers.get("content-type"),"image/jpeg");assert.equal((await avatarResponse.arrayBuffer()).byteLength,4);
   assert.equal((await call("GET", "/api/analytics?from=2026-09-01&to=2026-09-30")).response.status, 200);
   assert.equal((await call("GET", "/api/export/clients.csv?from=2026-09-01&to=2026-09-30")).response.status, 200);
 

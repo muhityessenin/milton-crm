@@ -55,7 +55,7 @@ function storageConfig(options = {}) {
     idleTimeoutMillis: positiveInteger("PG_POOL_IDLE_TIMEOUT_MS", 30000),
     queryTimeoutMillis: positiveInteger("PG_QUERY_TIMEOUT_MS", 60000),
     applicationName: process.env.PG_APPLICATION_NAME || "milton-crm",
-    stateCacheTtlMillis: nonNegativeInteger("PG_STATE_CACHE_TTL_MS", 250),
+    stateCacheTtlMillis: nonNegativeInteger("PG_STATE_CACHE_TTL_MS", 5000),
   };
 }
 

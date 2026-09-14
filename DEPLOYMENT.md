@@ -80,6 +80,19 @@ data is stored in the named `postgres_data` volume. Paid-trial receipt files are
 stored separately in the named `receipt_files` volume; PostgreSQL stores only
 their protected metadata/reference. Both volumes survive app rebuilds/restarts.
 
+The PostgreSQL read model stays hot while its `LISTEN/NOTIFY` change feed is
+connected and is invalidated immediately after committed changes. If the change
+feed reconnects, the cache is discarded and the configured
+`PG_STATE_CACHE_TTL_MS` (5000 ms by default) is used as the safety fallback.
+Time-based notification maintenance is coalesced and limited to once per user
+per 30 seconds, avoiding four repeated maintenance queries on rapid refreshes.
+
+Profile photos and the company logo remain in PostgreSQL for compatibility,
+but API payloads expose versioned media URLs instead of repeating base64 data.
+JSON, JavaScript, and CSS responses support gzip. Static assets use ETag
+revalidation, so a deploy is visible immediately while unchanged files return
+`304 Not Modified` instead of being downloaded again.
+
 ## Owner publication panel
 
 Only the global Owner can see or call the publication panel. Add these values
@@ -105,11 +118,17 @@ The backend verifies this fingerprint before sending the password. Clicking
 job. Its status and log live under `/tmp/milton-crm-deployments`, so the browser
 can reconnect and keep polling after the app container recreates itself.
 
-**Детальный деплой** fetches up to 30 recent commits from `origin/main` and
-shows each commit's date, time, author, SHA, and message. The selected full SHA
-is validated on the backend and again on the VPS: it must be an ancestor of
-`origin/main`. `deploy.sh` temporarily checks out that commit, rebuilds the
-stack, and restores the server checkout to `main` when it finishes.
+**Детальный деплой** показывает только версии, которые действительно были
+подняты на production и успешно прошли application health-check за последние
+30 дней. После успешного запуска `deploy.sh` присваивает версии следующий номер
+и сохраняет номер, время и точный Git SHA в
+`.deployment-state/successful.tsv`. Неуспешные запуски в историю не попадают.
+
+При выборе версии backend повторно проверяет серверный журнал и передаёт её
+точный SHA в `deploy.sh` как `DEPLOY_COMMIT`. Скрипт временно переключается на
+этот commit, пересобирает stack, проверяет health-check и возвращает checkout на
+`main`. Записи старше 30 дней удаляются, но счётчик версий не сбрасывается.
+PostgreSQL при таком возврате не откатывается: миграции остаются forward-only.
 
 ## Backups
 

@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const zlib = require("node:zlib");
 
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -32,13 +33,36 @@ function attachRequestContext(req, res) {
   return requestId;
 }
 
-function sendJson(res, code, value) {
-  if (res.writableEnded) return;
+function acceptsGzip(req) {
+  return /(?:^|,)\s*gzip\s*(?:;|,|$)/i.test(String(req?.headers?.["accept-encoding"] || ""));
+}
+
+function sendBuffer(req, res, code, buffer, headers) {
+  const compressible=/^(?:text\/|application\/(?:json|javascript)|image\/svg\+xml)/i.test(String(headers["Content-Type"]||""));
+  const gzip = compressible && buffer.length >= 1024 && acceptsGzip(req);
   res.writeHead(code, {
+    ...headers,
+    ...(compressible?{Vary:"Accept-Encoding"}:{}),
+    ...(gzip ? { "Content-Encoding":"gzip" } : { "Content-Length":String(buffer.length) }),
+  });
+  if (req?.method === "HEAD") return res.end();
+  if (gzip) {
+    const stream=zlib.createGzip({ level:zlib.constants.Z_BEST_SPEED });
+    stream.on("error",()=>res.destroy());
+    stream.pipe(res);
+    stream.end(buffer);
+    return stream;
+  }
+  res.end(buffer);
+}
+
+function sendJson(res, code, value, req = res.req) {
+  if (res.writableEnded) return;
+  const buffer=Buffer.from(JSON.stringify(value));
+  return sendBuffer(req,res,code,buffer,{
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
   });
-  res.end(JSON.stringify(value));
 }
 
 async function readJsonBody(req, limitBytes = 7_000_000) {
@@ -67,12 +91,11 @@ function serveStatic(publicDir, req, res, url) {
     return res.end("Не найдено");
   }
   const type = CONTENT_TYPES[path.extname(file).toLowerCase()] || "application/octet-stream";
-  res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-cache" });
-  if (req.method === "HEAD") return res.end();
-  fs.createReadStream(file).on("error", () => {
-    if (!res.headersSent) res.writeHead(500);
-    res.end();
-  }).pipe(res);
+  const stat=fs.statSync(file),etag=`W/\"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}\"`;
+  const cacheControl=relative==="index.html"?"no-cache":"public, max-age=0, must-revalidate";
+  if(req.headers["if-none-match"]===etag){res.writeHead(304,{ETag:etag,"Cache-Control":cacheControl,Vary:"Accept-Encoding"});return res.end();}
+  const buffer=fs.readFileSync(file);
+  return sendBuffer(req,res,200,buffer,{"Content-Type":type,"Cache-Control":cacheControl,ETag:etag,"Last-Modified":stat.mtime.toUTCString()});
 }
 
-module.exports = { applySecurityHeaders, attachRequestContext, readJsonBody, sendJson, serveStatic };
+module.exports = { applySecurityHeaders, attachRequestContext, readJsonBody, sendJson, serveStatic, acceptsGzip };

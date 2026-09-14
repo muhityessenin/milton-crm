@@ -18,12 +18,14 @@ const CHANGE_RESOURCES = {
 };
 
 class PostgresStorage {
-  constructor({ pool, db = pool, ownsPool = true, stateCache, stateCacheTtlMillis = 250 }) {
+  constructor({ pool, db = pool, ownsPool = true, stateCache, stateCacheTtlMillis = 5000, notificationRefreshMillis = 30000 }) {
     this.pool = pool;
     this.db = db;
     this.ownsPool = ownsPool;
-    this.stateCache = stateCache || { value: null, expiresAt: 0, pending: null };
+    this.stateCache = stateCache || { value: null, expiresAt: 0, pending: null, revision:0, changeFeedReady:false };
     this.stateCacheTtlMillis = stateCacheTtlMillis;
+    this.notificationRefreshMillis=notificationRefreshMillis;
+    this.notificationRefreshes=new Map();
     this.stateWriteQueue = Promise.resolve();
     this.changeListener = null;
     this.changeListenerTimer = null;
@@ -51,7 +53,7 @@ class PostgresStorage {
       pool.lastBackgroundError = { code: error.code || "PG_POOL_ERROR", at: new Date().toISOString() };
       console.error(`PostgreSQL pool background error: ${error.code || error.message}`);
     });
-    return new PostgresStorage({ pool, stateCacheTtlMillis: options.stateCacheTtlMillis ?? 250 });
+    return new PostgresStorage({ pool, stateCacheTtlMillis: options.stateCacheTtlMillis ?? 5000 });
   }
 
   async healthCheck() {
@@ -85,6 +87,8 @@ class PostgresStorage {
     const reconnect = (error) => {
       if(error)console.error(`PostgreSQL realtime listener error: ${error.code || error.message}`);
       if(this.changeListenerStopped||this.changeListenerTimer)return;
+      this.stateCache.changeFeedReady=false;
+      this.invalidateStateCache();
       this.changeListener=null;
       client.off("notification",handle);client.end().catch(()=>{});
       this.changeListenerTimer=setTimeout(()=>{this.changeListenerTimer=null;this.startChangeListener(onChange).catch(reconnect)},1000);
@@ -94,11 +98,13 @@ class PostgresStorage {
     client.once("error", reconnect);
     client.once("end", ()=>reconnect());
     await client.query("LISTEN milton_crm_changes");
+    this.stateCache.changeFeedReady=true;
     this.changeListener = { client, handle };
   }
 
   async stopChangeListener() {
     this.changeListenerStopped=true;clearTimeout(this.changeListenerTimer);this.changeListenerTimer=null;
+    this.stateCache.changeFeedReady=false;
     if (!this.changeListener) return;
     const { client, handle } = this.changeListener;
     this.changeListener = null;
@@ -108,6 +114,7 @@ class PostgresStorage {
   }
 
   invalidateStateCache() {
+    this.stateCache.revision=(this.stateCache.revision||0)+1;
     this.stateCache.value = null;
     this.stateCache.expiresAt = 0;
   }
@@ -138,21 +145,23 @@ class PostgresStorage {
 
   async runState(work, options = {}) {
     if (options.readOnly) {
-      let state = this.stateCacheTtlMillis > 0 && this.stateCache.value && this.stateCache.expiresAt > Date.now()
+      let state = this.stateCache.value && (this.stateCache.changeFeedReady || (this.stateCacheTtlMillis > 0 && this.stateCache.expiresAt > Date.now()))
         ? this.stateCache.value
         : null;
       if (!state) {
         if (!this.stateCache.pending) {
+          this.stateCache.pendingRevision=this.stateCache.revision||0;
           this.stateCache.pending = this.transaction((tx) => tx.state.load(), { invalidateCache: false });
         }
+        const pending=this.stateCache.pending,pendingRevision=this.stateCache.pendingRevision;
         try {
-          state = await this.stateCache.pending;
-          if (this.stateCacheTtlMillis > 0) {
+          state = await pending;
+          if (pendingRevision===(this.stateCache.revision||0)&&this.stateCacheTtlMillis > 0) {
             this.stateCache.value = state;
             this.stateCache.expiresAt = Date.now() + this.stateCacheTtlMillis;
           }
         } finally {
-          this.stateCache.pending = null;
+          if(this.stateCache.pending===pending){this.stateCache.pending=null;this.stateCache.pendingRevision=null;}
         }
       }
       const result = await work(state, this);
@@ -173,6 +182,17 @@ class PostgresStorage {
   }
 
   async ensureOperationalNotificationsFor(userId) {
+    if(!userId)return 0;
+    const current=this.notificationRefreshes.get(userId);
+    if(current?.pending)return current.pending;
+    if(current?.nextAt>Date.now())return 0;
+    const pending=this.refreshOperationalNotificationsFor(userId);
+    this.notificationRefreshes.set(userId,{pending,nextAt:0});
+    try{const result=await pending;this.notificationRefreshes.set(userId,{pending:null,nextAt:Date.now()+this.notificationRefreshMillis});return result;}
+    catch(error){this.notificationRefreshes.delete(userId);throw error;}
+  }
+
+  async refreshOperationalNotificationsFor(userId) {
     if (!userId) return 0;
     const result = await this.db.query(`
       WITH candidates AS (
