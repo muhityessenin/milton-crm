@@ -20,7 +20,9 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   progress("schema");
   const client=await ownerStorage.pool.connect();
   await client.query("BEGIN");
-  const txStorage=new PostgresStorage({pool:ownerStorage.pool,db:client,ownsPool:false});
+  // This storage shares one outer rollback transaction, so it cannot receive
+  // commit-time LISTEN/NOTIFY invalidations. Disable the read cache in this test.
+  const txStorage=new PostgresStorage({pool:ownerStorage.pool,db:client,ownsPool:false,stateCacheTtlMillis:0});
   t.after(async()=>{
     if(app.server.listening)await new Promise((resolve)=>app.server.close(resolve));
     await client.query("ROLLBACK").catch(()=>{});client.release();await ownerStorage.close();
@@ -64,14 +66,6 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   const slotDate=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Almaty"}).format(new Date(slot.startAt));
   result=await call("GET",`/api/schedule-board?date=${slotDate}`);assert.equal(result.response.status,200);assert.ok(result.body.closers.some((closer)=>closer.id==="usr_closer"));assert.equal(result.body.slots.find((item)=>item.id===slot.id).status,"FREE");
   token=managerToken;result=await call("GET",`/api/availability-summary?date=${slotDate}`);assert.equal(result.response.status,200);assert.equal(Object.keys(result.body.items[0]).some(key=>/closer/i.test(key)),false);result=await call("POST","/api/clients",{name:"PG Manager view-only",phone:"+77015556639",closerId:"usr_closer",slotId:slot.id,assignmentMode:"NOW",preferredDate:slotDate,preferredTimeText:"10:00",trialType:"FREE"});assert.equal(result.response.status,201);const managerOnlyClient=result.body;assert.equal(managerOnlyClient.activeTrial.assignmentState,"UNASSIGNED");assert.equal(managerOnlyClient.activeTrial.slotId,null);assert.equal((await call("GET","/api/slots?closerId=usr_closer")).body.find(item=>item.id===slot.id).status,"FREE");assert.equal((await call("GET","/api/unassigned-trials")).response.status,403);token=ownerToken;assert.equal((await call("DELETE",`/api/clients/${managerOnlyClient.id}`,{confirmation:"УДАЛИТЬ"})).response.status,200);
-
-  result=await call("POST","/api/admin/roles",{name:"Админ - Клоузеров",baseRole:"ADMIN",permissions:{"clients.view":true,"clients.changeStatus":true,"crm.view":true,"crm.changeStatus":true,"payments.view":true,"payments.create":false},scopes:{clients:"ALL",payments:"ALL"}});assert.equal(result.response.status,201);const closerAdminRole=result.body;
-  result=await call("POST","/api/admin/users",{name:"Админ - Клоузеров PG QA",login:`closer-admin.${loginSuffix}@milton.test`,password:"demo123",roleId:closerAdminRole.id});assert.equal(result.response.status,201);
-  result=await call("POST","/api/clients",{name:"Payment permission PG",phone:"+77015556638",managerId:"usr_manager",statusId:"st_scheduled",assignmentMode:"LATER",trialType:"FREE"});assert.equal(result.response.status,201);const permissionClientId=result.body.id,permissionTrial=result.body.activeTrial;result=await callAs(ownerToken,"POST",`/api/trials/${permissionTrial.id}/assign`,{slotId:slot.id,version:permissionTrial.assignmentVersion});assert.equal(result.response.status,200);
-  result=await call("POST","/api/login",{login:`closer-admin.${loginSuffix}@milton.test`,password:"demo123"});assert.equal(result.response.status,200);const closerAdminToken=result.body.token;
-  const permissionPayment={statusId:"st_payment",amount:25000,paymentMethodId:"method_1",paymentDate:"2026-09-14"};result=await callAs(closerAdminToken,"POST",`/api/clients/${permissionClientId}/status`,permissionPayment);assert.equal(result.response.status,403);assert.equal(result.body.missingPermission,"payments.create");assert.match(result.body.error,/Оплаты → Создание оплаты.*payments\.create/);
-  result=await call("GET",`/api/clients/${permissionClientId}`);assert.equal(result.body.payments.length,0);result=await call("PUT",`/api/admin/roles/${closerAdminRole.id}`,{permissions:{"payments.create":true}});assert.equal(result.response.status,200);
-  result=await callAs(closerAdminToken,"POST",`/api/clients/${permissionClientId}/status`,permissionPayment);assert.equal(result.response.status,200);result=await call("GET",`/api/clients/${permissionClientId}`);assert.equal(result.body.payments.length,1);assert.equal(result.body.client.currentStatusId,"st_payment");assert.equal((await call("DELETE",`/api/clients/${permissionClientId}`,{confirmation:"УДАЛИТЬ"})).response.status,200);
 
   token=closerToken;
   result=await call("POST","/api/slots/generate",{closerId:"usr_closer",date:"2031-01-15",start:"10:00",end:"14:00",durationMinutes:40});assert.equal(result.response.status,201);assert.equal(result.body.created,6);assert.equal(result.body.durationMinutes,40);
@@ -131,4 +125,12 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   progress("delete");
   assert.equal((await txStorage.clients.findById(clientId)),null);
   assert.ok((await txStorage.auditLogs.recent()).some((row)=>row.action==="CLIENT_PERMANENTLY_DELETED"));
+
+  result=await call("POST","/api/admin/roles",{name:"Админ - Клоузеров",baseRole:"ADMIN",permissions:{"clients.view":true,"clients.changeStatus":true,"crm.view":true,"crm.changeStatus":true,"payments.view":true,"payments.create":false},scopes:{clients:"ALL",payments:"ALL"}});assert.equal(result.response.status,201);const closerAdminRole=result.body;
+  result=await call("POST","/api/admin/users",{name:"Админ - Клоузеров PG QA",login:`closer-admin.${loginSuffix}@milton.test`,password:"demo123",roleId:closerAdminRole.id});assert.equal(result.response.status,201);
+  result=await call("POST","/api/clients",{name:"Payment permission PG",phone:"+77015556638",managerId:"usr_manager",closerId:"usr_closer",slotId:otherFree.id,statusId:"st_scheduled",trialType:"FREE"});assert.equal(result.response.status,201);const permissionClientId=result.body.id;
+  result=await call("POST","/api/login",{login:`closer-admin.${loginSuffix}@milton.test`,password:"demo123"});assert.equal(result.response.status,200);const closerAdminToken=result.body.token;
+  const permissionPayment={statusId:"st_payment",amount:25000,paymentMethodId:"method_1",paymentDate:"2026-09-14"};result=await callAs(closerAdminToken,"POST",`/api/clients/${permissionClientId}/status`,permissionPayment);assert.equal(result.response.status,403);assert.equal(result.body.missingPermission,"payments.create");assert.match(result.body.error,/Оплаты → Создание оплаты.*payments\.create/);
+  result=await call("GET",`/api/clients/${permissionClientId}`);assert.equal(result.body.payments.length,0);result=await call("PUT",`/api/admin/roles/${closerAdminRole.id}`,{permissions:{"payments.create":true}});assert.equal(result.response.status,200);
+  result=await callAs(closerAdminToken,"POST",`/api/clients/${permissionClientId}/status`,permissionPayment);assert.equal(result.response.status,200);result=await call("GET",`/api/clients/${permissionClientId}`);assert.equal(result.body.payments.length,1);assert.equal(result.body.client.currentStatusId,"st_payment");assert.equal((await call("DELETE",`/api/clients/${permissionClientId}`,{confirmation:"УДАЛИТЬ"})).response.status,200);
 });
