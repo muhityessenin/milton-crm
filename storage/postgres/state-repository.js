@@ -84,7 +84,7 @@ class PostgresStateRepository {
     }, { ...row, active:value(row,"active",true), isSystem:Boolean(row.isSystem), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });
 
     const references = [
-      ["statuses", state.statuses, { id:"id", name:"name", color:"color", sort_order:"sortOrder", action_type:"actionType", required_fields:"requiredFields", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
+      ["statuses", state.statuses, { id:"id", name:"name", color:"color", sort_order:"sortOrder", action_type:"actionType", required_fields:"requiredFields", partial_payment:"partialPayment", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["lead_sources", state.leadSources, { id:"id", name:"name", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["tags", state.tags, { id:"id", name:"name", color:"color", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["refusal_reasons", state.refusalReasons, { id:"id", name:"name", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
@@ -92,7 +92,7 @@ class PostgresStateRepository {
     ];
     for (const [table, rows, columns] of references) for (const row of rows) await upsert(this.db, table, columns, {
       ...row, color:value(row,"color",table === "tags" ? "#EDF0F5" : "#7C879E"), sortOrder:value(row,"sortOrder",0),
-      actionType:value(row,"actionType","NONE"), requiredFields:value(row,"requiredFields",[]), active:value(row,"active",true),
+      actionType:value(row,"actionType","NONE"), requiredFields:value(row,"requiredFields",[]), partialPayment:value(row,"partialPayment",false), active:value(row,"active",true),
       createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now), archivedAt:value(row,"archivedAt",null),
     });
 
@@ -108,6 +108,8 @@ class PostgresStateRepository {
       current_status_id:"currentStatusId", lead_source_id:"leadSourceId", registration_comment:"registrationComment",
       archived_at:"archivedAt", archived_by_user_id:"archivedByUserId", archive_reason:"archiveReason",
       current_reason_id:"currentReasonId",
+      total_deal_amount:"totalDealAmount", remaining_payment_due_date:"remainingPaymentDueDate",
+      prepayment_started_at:"prepaymentStartedAt", status_changed_at:"statusChangedAt",
       permanently_deleted_at:"permanentlyDeletedAt", permanently_deleted_by_user_id:"permanentlyDeletedByUserId",
       created_at:"createdAt", updated_at:"updatedAt",
     }, { ...row, registrationComment:value(row,"registrationComment",""), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });

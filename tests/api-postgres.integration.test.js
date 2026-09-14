@@ -100,6 +100,15 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   assert.equal((await call("POST",`/api/payments/${paymentId}/correct`,{amount:61000,paymentMethodId:"method_1",paymentDate:"2026-09-02",reason:"PostgreSQL API test"})).response.status,201);
   progress("correction");
 
+  result=await call("POST","/api/admin/config/statuses",{name:"Предоплата PG test",color:"#d99014",actionType:"NONE",partialPayment:true,sortOrder:90});assert.equal(result.response.status,201);const prepaymentStatus=result.body;assert.equal(prepaymentStatus.partialPayment,true);
+  const createdAtBeforePrepayment=(await call("GET",`/api/clients/${clientId}`)).body.client.createdAt;
+  result=await call("POST",`/api/clients/${clientId}/status`,{statusId:prepaymentStatus.id,amount:10000,totalDealAmount:80000,remainingPaymentDueDate:"2026-09-01",paymentMethodId:"method_1",paymentDate:"2026-09-02",paymentComment:"Предоплата PG"},{"Idempotency-Key":"postgres-api-prepayment-1"});assert.equal(result.response.status,200);assert.equal(result.body.prepayment.paymentTotal,71000);assert.equal(result.body.prepayment.remainingAmount,9000);assert.equal(new Date(result.body.createdAt).getTime(),new Date(createdAtBeforePrepayment).getTime());const statusChangedAt=result.body.statusChangedAt;
+  result=await call("GET","/api/bootstrap");assert.ok(result.body.notifications.some(item=>item.clientId===clientId&&item.type==="PREPAYMENT_BALANCE_DUE"&&!item.resolvedAt));
+  result=await call("POST",`/api/clients/${clientId}/notes`,{text:"PostgreSQL timestamp note"});assert.equal(result.response.status,201);result=await call("GET",`/api/clients/${clientId}`);assert.equal(new Date(result.body.client.statusChangedAt).getTime(),new Date(statusChangedAt).getTime());
+  result=await call("POST",`/api/clients/${clientId}/status`,{statusId:prepaymentStatus.id,amount:9000,totalDealAmount:80000,remainingPaymentDueDate:"2026-09-01",paymentMethodId:"method_1",paymentDate:"2026-09-02"},{"Idempotency-Key":"postgres-api-prepayment-2"});assert.equal(result.response.status,200);assert.equal(result.body.prepayment.remainingAmount,0);assert.equal(result.body.prepayment.active,false);assert.equal(new Date(result.body.statusChangedAt).getTime(),new Date(statusChangedAt).getTime());
+  result=await call("GET","/api/bootstrap");assert.ok(result.body.notifications.some(item=>item.clientId===clientId&&item.type==="PREPAYMENT_BALANCE_DUE"&&item.resolvedAt));
+  progress("prepayment");
+
   assert.equal((await call("POST",`/api/clients/${clientId}/archive`,{reason:"TEST"})).response.status,200);
   assert.equal((await call("POST",`/api/clients/${clientId}/restore`,{})).response.status,200);
   progress("archive-restore");

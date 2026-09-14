@@ -79,6 +79,7 @@ async function enrichedClient(tx, clientId, viewer, archiveReasons) {
       COALESCE((SELECT jsonb_agg(ct.tag_id ORDER BY ct.tag_id) FROM client_tags ct WHERE ct.client_id=c.id),'[]') tag_ids,
       to_jsonb(manager_row) manager_row,to_jsonb(closer_row) closer_row,to_jsonb(original_manager_row) original_manager_row,to_jsonb(archived_by_row) archived_by_row,
       to_jsonb(status_row) status_row,to_jsonb(reason_row) reason_row,to_jsonb(source_row) source_row,
+      COALESCE(c.status_changed_at,(SELECT h.created_at FROM client_history h WHERE h.client_id=c.id AND h.event_type='STATUS_CHANGED' AND h.new_value->>'statusId'=c.current_status_id ORDER BY h.created_at DESC LIMIT 1),c.created_at) derived_status_changed_at,
       (SELECT to_jsonb(t) FROM trials t WHERE t.client_id=c.id AND t.active LIMIT 1) active_trial_row,
       COALESCE((SELECT jsonb_agg(to_jsonb(tag_row) ORDER BY tag_row.id) FROM client_tags ct JOIN tags tag_row ON tag_row.id=ct.tag_id WHERE ct.client_id=c.id),'[]') tags_rows,
       CASE WHEN $2::boolean THEN COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.payment_date DESC,p.created_at DESC) FROM payments p WHERE p.client_id=c.id AND p.voided_at IS NULL),'[]') ELSE '[]'::jsonb END payments_rows
@@ -94,13 +95,14 @@ async function enrichedClient(tx, clientId, viewer, archiveReasons) {
   `, [clientId, canViewPayments]);
   if (!result.rowCount) return null;
   const raw = result.rows[0], client = camelRow(raw);
-  for (const key of ["managerRow", "closerRow", "originalManagerRow", "archivedByRow", "statusRow", "reasonRow", "sourceRow", "activeTrialRow", "tagsRows", "paymentsRows"]) delete client[key];
+  for (const key of ["managerRow", "closerRow", "originalManagerRow", "archivedByRow", "statusRow", "reasonRow", "sourceRow", "activeTrialRow", "tagsRows", "paymentsRows","derivedStatusChangedAt"]) delete client[key];
   const manager = mapUser(raw.manager_row), closer = mapUser(raw.closer_row), originalManager = mapUser(raw.original_manager_row), archivedBy = mapUser(raw.archived_by_row);
   const status = camelRow(raw.status_row), currentReason=camelRow(raw.reason_row), leadSource = camelRow(raw.source_row), activeTrial = camelRow(raw.active_trial_row);
   const tags = (raw.tags_rows || []).map(camelRow), payments = (raw.payments_rows || []).map(mapPayment);
   const activePayments = payments.filter((payment) => !payment.voidedAt);
   const overdue = activeTrial?.assignmentState!=="UNASSIGNED" && activeTrial?.scheduledAt && new Date(activeTrial.scheduledAt).getTime() + 3600000 < Date.now() && client.currentStatusId === activeTrial.statusAtBookingId;
-  return { ...client, manager: publicUser(manager), closer: publicUser(closer)||{id:null,name:"Без клоузера",role:"CLOSER",avatarUrl:""}, originalManager: publicUser(originalManager), archivedBy: publicUser(archivedBy), archiveReasonLabel: archiveReasons[client.archiveReason] || client.archiveReason || null, status,currentReason, leadSource, tags, activeTrial, payments: activePayments, paymentTotal: activePayments.reduce((sum, payment) => sum + Number(payment.amount), 0), overdue: Boolean(overdue) };
+  const paymentTotal=activePayments.reduce((sum,payment)=>sum+Number(payment.amount),0),totalDealAmount=Number(client.totalDealAmount||0),remainingAmount=Math.max(0,totalDealAmount-paymentTotal),prepayment=totalDealAmount>0?{totalDealAmount,paymentTotal,remainingAmount,dueDate:client.remainingPaymentDueDate||null,startedAt:client.prepaymentStartedAt||null,active:remainingAmount>0}:null;
+  return { ...client,statusChangedAt:client.statusChangedAt||raw.derived_status_changed_at, manager: publicUser(manager), closer: publicUser(closer)||{id:null,name:"Без клоузера",role:"CLOSER",avatarUrl:""}, originalManager: publicUser(originalManager), archivedBy: publicUser(archivedBy), archiveReasonLabel: archiveReasons[client.archiveReason] || client.archiveReason || null, status,currentReason, leadSource, tags, activeTrial, payments: activePayments, paymentTotal,prepayment, overdue: Boolean(overdue) };
 }
 
 async function appendHistory(tx, clientId, actorId, eventType, oldValue, newValue, createdAt = now()) {
@@ -217,7 +219,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           if(action==="reassign"&&locked.slot_id&&new Date(locked.scheduled_at)>new Date())await tx.db.query("UPDATE availability_slots SET status='FREE',booked_trial_id=NULL WHERE id=$1 AND booked_trial_id=$2",[locked.slot_id,trialId]);
           const wasPending=Boolean(locked.pending_reschedule);
           await tx.db.query("UPDATE trials SET closer_id=$2,slot_id=$3,scheduled_at=$4,assignment_state='SCHEDULED',assigned_at=$5,assigned_by_user_id=$6,assignment_version=assignment_version+1,pending_reschedule=false,updated_at=$5 WHERE id=$1",[trialId,slot.closerId,slot.id,slot.startAt,changedAt,actor.id]);
-          await tx.db.query("UPDATE clients SET current_closer_id=$2,current_status_id=CASE WHEN $4 THEN $5 ELSE current_status_id END,current_reason_id=CASE WHEN $4 THEN NULL ELSE current_reason_id END,updated_at=$3 WHERE id=$1",[client.id,slot.closerId,changedAt,wasPending,locked.status_at_booking_id]);
+          await tx.db.query("UPDATE clients SET current_closer_id=$2,current_status_id=CASE WHEN $4 THEN $5 ELSE current_status_id END,current_reason_id=CASE WHEN $4 THEN NULL ELSE current_reason_id END,updated_at=$3,status_changed_at=CASE WHEN $4 AND current_status_id<>$5 THEN $3 ELSE status_changed_at END WHERE id=$1",[client.id,slot.closerId,changedAt,wasPending,locked.status_at_booking_id]);
           if(wasPending)await tx.notifications.resolveForTrial(trialId,"TRIAL_RESCHEDULE_PENDING",changedAt);
           const newValue={closerId:slot.closerId,slotId:slot.id,scheduledAt:slot.startAt};const eventType=wasPending?"TRIAL_RESCHEDULE_TIME_ASSIGNED":action==="assign"?"TRIAL_ASSIGNED":"TRIAL_ASSIGNMENT_CHANGED";
           await appendHistory(tx,client.id,actor.id,eventType,oldValue,newValue,changedAt);await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"TRIAL",entityId:trialId,action:eventType,oldValue,newValue,createdAt:changedAt});await appendNotification(tx,slot.closerId,client.id,"TRIAL_ASSIGNED",`${client.name} · ${slot.startAt}`,trialId,changedAt);
@@ -255,6 +257,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
             requirePermission(actor, "clients.addNotes");
             const text = String(input.text || "").trim(); if (!text) throw new HttpError(422, "Введите текст заметки");
             const note = await tx.notes.create({ id: makeId("note"), clientId, authorUserId: actor.id, noteType: actor.role === "MANAGER" ? "MANAGER_NOTE" : "CLOSER_NOTE", text, createdAt: now() });
+            await tx.db.query("UPDATE clients SET updated_at=$2 WHERE id=$1",[clientId,note.createdAt]);
             await appendHistory(tx, clientId, actor.id, "NOTE_ADDED", null, { noteId: note.id, type: note.noteType });
             return { status: 201, body: note };
           }
@@ -288,7 +291,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
             const status = await tx.statuses.findById(input.statusId);
             if (!status?.active) throw new HttpError(422, "Выберите активный статус");
             if (actor.role === "MANAGER" && !["REQUIRE_RESCHEDULE", "MARK_NO_SHOW"].includes(status.actionType)) throw new HttpError(403, "Этот статус может изменить только клоузер");
-            const requiredFields=status.actionType==="REQUIRE_RESCHEDULE"?(input.rescheduleMode==="LATER"?["refusalReasonId"]:["refusalReasonId","newSlotId"]):(status.requiredFields||[]);
+            const paymentAction=status.actionType==="REQUIRE_PAYMENT"||status.partialPayment,requiredFields=status.actionType==="REQUIRE_RESCHEDULE"?(input.rescheduleMode==="LATER"?["refusalReasonId"]:["refusalReasonId","newSlotId"]):(paymentAction?["amount","paymentMethodId","paymentDate",...(status.partialPayment?["totalDealAmount","remainingPaymentDueDate"]:[])]:status.requiredFields||[]);
             const missing = requiredFields.filter((field) => input[field] === undefined || input[field] === null || input[field] === "");
             if (missing.length) throw new HttpError(422, "Заполните все обязательные поля", missing);
             if (["REQUIRE_REFUSAL_REASON","REQUIRE_RESCHEDULE"].includes(status.actionType)) { const reason = await tx.refusalReasons.findById(input.refusalReasonId); if (!reason?.active) throw new HttpError(422, status.actionType==="REQUIRE_RESCHEDULE"?"Выберите причину переноса":"Выберите активную причину отказа"); }
@@ -297,20 +300,22 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
               requirePermission(actor, "schedule.rescheduleTrial");
               await tx.rescheduleTrial({ clientId, actorUserId: actor.id, newSlotId: input.newSlotId, statusId: status.id, reasonId:input.refusalReasonId,rescheduleMode:input.rescheduleMode==="LATER"?"LATER":"NOW",changedAt });
             } else {
-              if (status.actionType === "REQUIRE_PAYMENT") {
+              if (paymentAction) {
                 requirePermission(actor, "payments.create");
                 const amount = Number(input.amount), paymentDate = String(input.paymentDate || ""), key = String(req.headers["idempotency-key"] || input.idempotencyKey || "").trim() || null;
                 if (!(amount > 0) || !(await tx.paymentMethods.findById(input.paymentMethodId))?.active || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) throw new HttpError(422, "Укажите корректную сумму, способ и дату оплаты");
+                if(status.partialPayment){const total=Number(input.totalDealAmount),paidBefore=Number((await tx.db.query("SELECT COALESCE(sum(amount),0) total FROM payments WHERE client_id=$1 AND voided_at IS NULL",[clientId])).rows[0].total);if(!(total>0)||paidBefore+amount>total||!/^\d{4}-\d{2}-\d{2}$/.test(String(input.remainingPaymentDueDate||"")))throw new HttpError(422,"Общая сумма должна быть не меньше всех оплат, укажите дату доплаты");await tx.db.query("UPDATE clients SET total_deal_amount=$2,remaining_payment_due_date=$3,prepayment_started_at=COALESCE(prepayment_started_at,$4) WHERE id=$1",[clientId,total,input.remainingPaymentDueDate,changedAt]);await appendHistory(tx,clientId,actor.id,"PREPAYMENT_UPDATED",null,{paymentAmount:amount,totalDealAmount:total,remainingPaymentDueDate:input.remainingPaymentDueDate},changedAt);}
                 if (key && key.length > 128) throw new HttpError(422, "Ключ идемпотентности слишком длинный");
                 const existing = key ? await tx.db.query("SELECT id FROM payments WHERE created_by_user_id=$1 AND idempotency_key=$2", [actor.id, key]) : { rowCount: 0 };
                 if (existing.rowCount) return { status: 200, body: await enrichedClient(tx, clientId, actor, archiveReasons) };
                 await tx.recordPayment({ paymentId: makeId("pay"), clientId, actorUserId: actor.id, closerAttributionId: actor.role === "CLOSER" ? actor.id : client.currentCloserId, amount, paymentMethodId: input.paymentMethodId, paymentDate, comment: input.paymentComment || "", statusId: status.id, idempotencyKey: key, createdAt: changedAt });
               } else await tx.clients.updateStatus(clientId, status.id);
-              await tx.db.query("UPDATE clients SET current_reason_id=$2,updated_at=$3 WHERE id=$1",[clientId,input.refusalReasonId||null,changedAt]);
+              await tx.db.query("UPDATE clients SET current_reason_id=$2,updated_at=$3,status_changed_at=CASE WHEN $4 THEN $3 ELSE status_changed_at END WHERE id=$1",[clientId,input.refusalReasonId||null,changedAt,oldStatusId!==status.id]);
+              if(paymentAction){const balance=(await tx.db.query("SELECT c.total_deal_amount-COALESCE(sum(p.amount) FILTER(WHERE p.voided_at IS NULL),0) remaining FROM clients c LEFT JOIN payments p ON p.client_id=c.id WHERE c.id=$1 GROUP BY c.id",[clientId])).rows[0]?.remaining;if(balance!==null&&Number(balance)<=0)await tx.db.query("UPDATE notifications SET resolved_at=$2,snoozed_until=NULL,updated_at=$2 WHERE client_id=$1 AND type='PREPAYMENT_BALANCE_DUE' AND resolved_at IS NULL",[clientId,changedAt]);}
               const activeTrial = await tx.trials.findActiveByClient(clientId, { forUpdate: true });
               if (activeTrial && status.id !== activeTrial.statusAtBookingId) await tx.trials.finish(activeTrial.id, { completedAt: changedAt, resultStatusId: status.id, resultAt: changedAt, resultActorUserId: actor.id, attendanceOutcome: status.actionType === "MARK_NO_SHOW" ? "NO_SHOW" : "REACHED" });
             }
-            await appendHistory(tx, clientId, actor.id, "STATUS_CHANGED", { statusId: oldStatusId }, { statusId: status.id, refusalReasonId: input.refusalReasonId || null }, changedAt);
+            await appendHistory(tx, clientId, actor.id, "STATUS_CHANGED", { statusId: oldStatusId }, { statusId: status.id, refusalReasonId: input.refusalReasonId || null,totalDealAmount:status.partialPayment?Number(input.totalDealAmount):null,remainingPaymentDueDate:status.partialPayment?input.remainingPaymentDueDate:null }, changedAt);
             return { status: 200, body: await enrichedClient(tx, clientId, actor, archiveReasons) };
           }
         }
@@ -327,6 +332,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           const amount = Number(input.amount);
           if (!(amount > 0) || !(await tx.paymentMethods.findById(input.paymentMethodId))?.active || !/^\d{4}-\d{2}-\d{2}$/.test(input.paymentDate || "")) throw new HttpError(422, "Укажите корректную сумму, способ и дату оплаты");
           const replacement = await tx.correctPayment({ paymentId: payment.id, replacementPaymentId: makeId("pay"), correctionId: makeId("pcorr"), historyId: makeId("hist"), auditId: makeId("audit"), actorUserId: actor.id, amount, paymentMethodId: input.paymentMethodId, paymentDate: input.paymentDate, comment: input.comment || "", reason: String(input.reason || "") });
+          const correctedAt=now();await tx.db.query("UPDATE clients SET updated_at=$2 WHERE id=$1",[client.id,correctedAt]);const balance=(await tx.db.query("SELECT c.total_deal_amount-COALESCE(sum(p.amount) FILTER(WHERE p.voided_at IS NULL),0) remaining FROM clients c LEFT JOIN payments p ON p.client_id=c.id WHERE c.id=$1 GROUP BY c.id",[client.id])).rows[0]?.remaining;if(balance!==null&&Number(balance)<=0)await tx.db.query("UPDATE notifications SET resolved_at=$2,snoozed_until=NULL,updated_at=$2 WHERE client_id=$1 AND type='PREPAYMENT_BALANCE_DUE' AND resolved_at IS NULL",[client.id,correctedAt]);
           return { status: 201, body: replacement };
         }
 
