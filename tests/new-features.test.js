@@ -44,3 +44,23 @@ test("migration preserves completed slots and emits commit-safe PostgreSQL notif
   const sql=fs.readFileSync(path.join(__dirname,"..","migrations","005_realtime_trial_receipts_and_schedule.sql"),"utf8");
   assert.match(sql,/status IN \('FREE', 'BOOKED', 'OCCUPIED'\)/);assert.match(sql,/status = 'OCCUPIED'/);assert.match(sql,/pg_notify\('milton_crm_changes'/);assert.match(sql,/FOR EACH STATEMENT/);
 });
+
+test("prepayment migration is additive and keeps remaining balance derived from payments", () => {
+  const sql=fs.readFileSync(path.join(__dirname,"..","migrations","009_prepayment_and_client_timestamps.sql"),"utf8");
+  assert.match(sql,/ADD COLUMN IF NOT EXISTS partial_payment/);
+  assert.match(sql,/ADD COLUMN IF NOT EXISTS total_deal_amount/);
+  assert.match(sql,/ADD COLUMN IF NOT EXISTS status_changed_at/);
+  assert.match(sql,/notifications_user_client_balance_uidx/);
+  assert.doesNotMatch(sql,/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM)\b/i);
+  assert.doesNotMatch(sql,/remaining_amount/i);
+});
+
+test("CRM cards add compact prepayment and exact timestamps without replacing existing facts", () => {
+  const app=fs.readFileSync(path.join(__dirname,"..","public","app.js"),"utf8"),css=fs.readFileSync(path.join(__dirname,"..","public","styles.css"),"utf8");
+  for(const label of ["Менеджер:","Клоузер:","Сумма:","Статус:","Причина:","Пробный:","Создан:","Статус с:","Изм.:"])assert.match(app,new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")));
+  assert.match(app,/if\(!p\?\.active\)return''/);
+  assert.match(app,/Предоплата:.*Остаток:/);
+  assert.match(app,/timeZone:'Asia\/Almaty'/);
+  assert.match(css,/\.card-timestamps\{/);
+  assert.match(css,/\.prepayment-card\{/);
+});

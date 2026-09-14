@@ -33,8 +33,9 @@ BEGIN
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '005')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '006')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '007')
-    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '008') THEN
-    RAISE EXCEPTION 'Expected schema migration versions 001 through 008';
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '008')
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '009') THEN
+    RAISE EXCEPTION 'Expected schema migration versions 001 through 009';
   END IF;
 END;
 $$;
@@ -97,6 +98,17 @@ BEGIN
     WHERE table_schema='public' AND table_name='users' AND column_name='trial_duration_minutes'
   ) THEN
     RAISE EXCEPTION 'Missing optional per-Closer trial duration column';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='statuses' AND column_name='partial_payment')
+    OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='clients' AND column_name='total_deal_amount')
+    OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='clients' AND column_name='remaining_payment_due_date')
+    OR NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='clients' AND column_name='status_changed_at') THEN
+    RAISE EXCEPTION 'Missing prepayment or client timestamp columns';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='notifications_user_client_balance_uidx') THEN
+    RAISE EXCEPTION 'Missing durable prepayment reminder index';
   END IF;
 END;
 $$;

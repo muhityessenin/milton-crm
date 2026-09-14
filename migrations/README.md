@@ -13,7 +13,8 @@ These migrations support the PostgreSQL HTTP backend. They do not import
 6. `006_unassigned_trials.sql` adds an explicit unassigned trial state, preferred-time fields, assignment concurrency versioning, reminder configuration, and assignment permissions without adding a CRM status.
 7. `007_closer_availability_management.sql` adds an optional per-Closer trial duration with a backward-compatible null/default fallback.
 8. `008_trial_operations.sql` adds the current card reason, pending-reschedule lineage, and durable notification snooze/resolution fields without rewriting existing rows.
-9. `tests/verify_schema.sql` validates the catalog and exercises critical constraints inside a transaction that is always rolled back.
+9. `009_prepayment_and_client_timestamps.sql` adds configurable partial-payment behavior, deal metadata, an exact status-change timestamp, and a deduplicated balance-reminder index without rewriting existing rows.
+10. `tests/verify_schema.sql` validates the catalog and exercises critical constraints inside a transaction that is always rolled back.
 
 ## Application requirements for the future cutover
 

@@ -62,10 +62,10 @@ class PostgresStorage {
   async assertSchema() {
     const result = await this.db.query(`
       SELECT version FROM public.schema_migrations
-      WHERE version IN ('001', '002', '003', '004', '005', '006', '007', '008') ORDER BY version
+      WHERE version IN ('001', '002', '003', '004', '005', '006', '007', '008', '009') ORDER BY version
     `);
-    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007,008") {
-      throw new Error("Milton PostgreSQL migrations 001 through 008 are required");
+    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007,008,009") {
+      throw new Error("Milton PostgreSQL migrations 001 through 009 are required");
     }
   }
 
@@ -202,8 +202,33 @@ class PostgresStorage {
         AND (t.manager_id=$1 OR viewer.business_role='ADMIN')
       ON CONFLICT(user_id,type,trial_id) WHERE trial_id IS NOT NULL DO NOTHING
     `,[userId]);
-    if(result.rowCount||unassigned.rowCount)this.invalidateStateCache();
-    return result.rowCount+unassigned.rowCount;
+    const balances=await this.db.query(`
+      INSERT INTO notifications(id,user_id,client_id,type,content)
+      SELECT 'notif_'||substr(replace(gen_random_uuid()::text,'-',''),1,8),$1,c.id,'PREPAYMENT_BALANCE_DUE',
+        c.name||CASE WHEN c.remaining_payment_due_date=(now() AT TIME ZONE 'Asia/Almaty')::date THEN ' · доплата сегодня: ' ELSE ' · доплата просрочена: ' END||
+        greatest(0,c.total_deal_amount-COALESCE(p.paid,0))||' ₸'
+      FROM clients c
+      JOIN users viewer ON viewer.id=$1
+      LEFT JOIN (SELECT client_id,sum(amount) paid FROM payments WHERE voided_at IS NULL GROUP BY client_id) p ON p.client_id=c.id
+      WHERE c.archived_at IS NULL AND c.total_deal_amount IS NOT NULL AND c.remaining_payment_due_date IS NOT NULL
+        AND c.remaining_payment_due_date<=(now() AT TIME ZONE 'Asia/Almaty')::date
+        AND c.total_deal_amount-COALESCE(p.paid,0)>0
+        AND (c.current_manager_id=$1 OR viewer.business_role='ADMIN')
+      ON CONFLICT(user_id,client_id,type) WHERE trial_id IS NULL AND client_id IS NOT NULL AND type='PREPAYMENT_BALANCE_DUE'
+      DO UPDATE SET content=EXCLUDED.content,updated_at=now(),resolved_at=NULL
+      WHERE notifications.content IS DISTINCT FROM EXCLUDED.content OR notifications.resolved_at IS NOT NULL
+    `,[userId]);
+    const resolvedBalances=await this.db.query(`
+      UPDATE notifications n SET resolved_at=now(),snoozed_until=NULL,updated_at=now()
+      WHERE n.user_id=$1 AND n.type='PREPAYMENT_BALANCE_DUE' AND n.resolved_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM clients c LEFT JOIN payments p ON p.client_id=c.id AND p.voided_at IS NULL
+          WHERE c.id=n.client_id AND c.total_deal_amount IS NOT NULL
+          GROUP BY c.id HAVING c.total_deal_amount-COALESCE(sum(p.amount),0)>0
+        )
+    `,[userId]);
+    if(result.rowCount||unassigned.rowCount||balances.rowCount||resolvedBalances.rowCount)this.invalidateStateCache();
+    return result.rowCount+unassigned.rowCount+balances.rowCount+resolvedBalances.rowCount;
   }
 
   async registerClientAndBookTrial(input) {
@@ -303,7 +328,7 @@ class PostgresStorage {
         assignmentState:"SCHEDULED",rescheduleReasonId:input.reasonId,rescheduleFromTrialId:oldTrial?.id||null,
         previousCloserId:oldTrial?.closerId||client.currentCloserId,
       });
-      await tx.db.query("UPDATE clients SET current_status_id=$2,current_reason_id=$3,updated_at=$4 WHERE id=$1",[client.id,input.statusId,input.reasonId,changedAt]);
+      await tx.db.query("UPDATE clients SET current_status_id=$2,current_reason_id=$3,updated_at=$4,status_changed_at=CASE WHEN current_status_id<>$2 THEN $4 ELSE status_changed_at END WHERE id=$1",[client.id,input.statusId,input.reasonId,changedAt]);
       await tx.history.append({ id: input.historyId || id("hist"), clientId: client.id, actorUserId: input.actorUserId, eventType: later?"TRIAL_RESCHEDULE_PENDING":"TRIAL_RESCHEDULED", oldValue: oldTrial && { trialId: oldTrial.id, scheduledAt: oldTrial.scheduledAt, closerId:oldTrial.closerId }, newValue: { trialId: trial.id, scheduledAt: trial.scheduledAt, reasonId:input.reasonId }, createdAt: changedAt });
       const recipients=later?(await tx.db.query("SELECT id FROM users WHERE active AND business_role='ADMIN'")).rows.map((row)=>row.id):[client.currentManagerId,client.currentCloserId];
       for (const userId of new Set(recipients.filter(Boolean))) {
@@ -329,7 +354,7 @@ class PostgresStorage {
         createdBy: input.actorUserId, createdAt,
         idempotencyKey: input.idempotencyKey || null,
       });
-      if (input.statusId) await tx.clients.updateStatus(client.id, input.statusId);
+      if (input.statusId) await tx.db.query("UPDATE clients SET current_status_id=$2,updated_at=$3,status_changed_at=CASE WHEN current_status_id<>$2 THEN $3 ELSE status_changed_at END WHERE id=$1",[client.id,input.statusId,createdAt]);
       await tx.history.append({ id: input.historyId || id("hist"), clientId: client.id, actorUserId: input.actorUserId, eventType: "PAYMENT_CREATED", oldValue: null, newValue: { paymentId: payment.id, amount: Number(payment.amount), paymentDate: payment.paymentDate }, createdAt });
       await tx.notifications.create({ id: input.notificationId || id("notif"), userId: client.currentManagerId, clientId: client.id, type: "PAYMENT_RECORDED", content: `${client.name} · ${payment.amount} ₸`, createdAt });
       return payment;

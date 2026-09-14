@@ -161,14 +161,17 @@ class ClientsRepository extends SqlRepository {
       INSERT INTO public.clients (
         id, name, normalized_phone, original_phone, original_manager_id, current_manager_id,
         current_closer_id, current_status_id, lead_source_id, registration_comment,
-        archived_at, archived_by_user_id, archive_reason, current_reason_id, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,now()),COALESCE($16,now()))
+        archived_at, archived_by_user_id, archive_reason, current_reason_id,
+        total_deal_amount, remaining_payment_due_date, prepayment_started_at, status_changed_at,
+        created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,COALESCE($19,now()),COALESCE($20,now()))
       RETURNING *
     `, [
       value.id, value.name, value.normalizedPhone, value.originalPhone,
       value.originalManagerId, value.currentManagerId, value.currentCloserId,
       value.currentStatusId, value.leadSourceId || null, value.registrationComment || "",
       value.archivedAt || null, value.archivedByUserId || null, value.archiveReason || null, value.currentReasonId || null,
+      value.totalDealAmount || null, value.remainingPaymentDueDate || null, value.prepaymentStartedAt || null, value.statusChangedAt || null,
       value.createdAt || null, value.updatedAt || null,
     ]);
     await this.replaceTags(value.id, value.tagIds || []);

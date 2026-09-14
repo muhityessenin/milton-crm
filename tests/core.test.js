@@ -98,6 +98,18 @@ test("historical manager and closer attribution survives reassignment", () => {
   assert.equal(current.kpis.trials,0);
 });
 
+test("closer result statistics use the outcome date instead of registration or schedule date", () => {
+  const store=seedDatabase(),actor=store.users.find((u)=>u.id==="usr_admin");
+  store.clients=[{id:"result-date-client",name:"Result Date",originalManagerId:"usr_manager",currentManagerId:"usr_manager",currentCloserId:"usr_closer",currentStatusId:"st_payment",leadSourceId:"src_1",tagIds:[],createdAt:"2026-09-13T10:00:00.000Z",updatedAt:"2026-09-14T10:00:00.000Z"}];
+  store.trials=[{id:"result-date-trial",clientId:"result-date-client",managerId:"usr_manager",closerId:"usr_closer",assignmentState:"SCHEDULED",scheduledAt:"2026-09-13T12:00:00.000Z",completedAt:"2026-09-14T10:00:00.000Z",resultAt:"2026-09-14T10:00:00.000Z",resultStatusId:"st_payment",active:false,statusAtBookingId:"st_scheduled",createdAt:"2026-09-13T10:00:00.000Z"}];
+  store.payments=[{id:"result-date-payment",clientId:"result-date-client",managerAttributionId:"usr_manager",closerAttributionId:"usr_closer",amount:75000,paymentMethodId:"method_1",paymentDate:"2026-09-14",createdAt:"2026-09-14T10:00:00.000Z",voidedAt:null}];store.history=[];setDbForTests(store);
+  const todayReport=analyticsReport(actor,reportFilters({from:"2026-09-14",to:"2026-09-14"})),yesterdayReport=analyticsReport(actor,reportFilters({from:"2026-09-13",to:"2026-09-13"}));
+  assert.equal(todayReport.closers.find((row)=>row.id==="usr_closer")?.trials,1);
+  assert.equal(todayReport.closers.find((row)=>row.id==="usr_closer")?.conversion,100);
+  assert.equal(yesterdayReport.closers.some((row)=>row.id==="usr_closer"),false);
+  assert.equal(yesterdayReport.kpis.trials,1);
+});
+
 test("archived clients are excluded operationally but can be included intentionally", () => {
   const {store,actor}=analyticsFixture();
   store.clients[0].archivedAt="2026-01-20T10:00:00.000Z";
