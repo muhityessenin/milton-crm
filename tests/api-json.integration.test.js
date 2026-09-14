@@ -17,6 +17,7 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   t.after(async () => {
     if (server.listening) await new Promise((resolve) => server.close(resolve));
     await closeStorage();
+    fs.rmSync(directory,{recursive:true,force:true});
   });
   const base = `http://127.0.0.1:${server.address().port}`;
   let token = "";
@@ -34,6 +35,7 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   let result = await call("GET", "/api/health");
   assert.equal(result.response.status, 200);
   assert.deepEqual(result.body, { status:"ok", storage:"json" });
+  const staticResponse=await fetch(`${base}/app.js`,{headers:{"Accept-Encoding":"gzip"}});assert.equal(staticResponse.status,200);assert.equal(staticResponse.headers.get("content-encoding"),"gzip");assert.match(staticResponse.headers.get("cache-control"),/must-revalidate/);const staticEtag=staticResponse.headers.get("etag");await staticResponse.arrayBuffer();const cachedStatic=await fetch(`${base}/app.js`,{headers:{"If-None-Match":staticEtag}});assert.equal(cachedStatic.status,304);
 
   result = await call("POST", "/api/login", { login:"admin@milton.kz", password:"demo123" });
   assert.equal(result.response.status, 200); token = result.body.token;
@@ -48,6 +50,7 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
 
   result = await call("GET", "/api/bootstrap");
   assert.equal(result.response.status, 200);
+  assert.equal(result.response.headers.get("content-encoding"),"gzip");
   result=await call("GET","/api/sync?resources=notifications");assert.equal(result.response.status,200);assert.ok(Array.isArray(result.body.notifications));assert.equal("clients" in result.body,false);
   result = await call("GET", "/api/bootstrap");
   const slot = result.body.dashboard ? (await call("GET", "/api/slots?closerId=usr_closer")).body.find((item) => item.status === "FREE") : null;
@@ -102,9 +105,8 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   result = await call("POST", `/api/clients/${clientId}/restore`, {});
   assert.equal(result.response.status, 200);
 
-  result = await call("PUT", "/api/admin/branding", { companyName:"Milton", accentColor:"#3157D5", logoUrl:"" });
-  assert.equal(result.response.status, 200);
-  const avatarDataUrl="data:image/jpeg;base64,/9j/2Q==";result=await call("PUT","/api/profile",{avatarUrl:avatarDataUrl});assert.equal(result.response.status,200);assert.equal((await call("GET","/api/bootstrap")).body.me.avatarUrl,avatarDataUrl);
+  const logoDataUrl="data:image/png;base64,iVBORw0KGgo=";result = await call("PUT", "/api/admin/branding", { companyName:"Milton", accentColor:"#3157D5", logoUrl:logoDataUrl });assert.equal(result.response.status, 200);assert.match(result.body.logoUrl,/^\/api\/branding\/logo\?v=/);const logoResponse=await fetch(`${base}${result.body.logoUrl}`,{headers:{Authorization:`Bearer ${token}`}});assert.equal(logoResponse.status,200);assert.equal(logoResponse.headers.get("content-type"),"image/png");const logoEtag=logoResponse.headers.get("etag");await logoResponse.arrayBuffer();assert.equal((await fetch(`${base}${result.body.logoUrl}`,{headers:{Authorization:`Bearer ${token}`,"If-None-Match":logoEtag}})).status,304);result=await call("PUT","/api/admin/branding",{companyName:"Milton",accentColor:"#3157D5",logoUrl:""});assert.equal(result.response.status,200);
+  const avatarDataUrl="data:image/jpeg;base64,/9j/2Q==";result=await call("PUT","/api/profile",{avatarUrl:avatarDataUrl});assert.equal(result.response.status,200);const optimizedBootstrap=await call("GET","/api/bootstrap"),avatarUrl=optimizedBootstrap.body.me.avatarUrl;assert.match(avatarUrl,/^\/api\/users\/usr_admin\/avatar\?v=/);assert.equal(JSON.stringify(optimizedBootstrap.body).includes("data:image"),false);const avatarResponse=await fetch(`${base}${avatarUrl}`,{headers:{Authorization:`Bearer ${token}`}});assert.equal(avatarResponse.status,200);assert.equal(avatarResponse.headers.get("content-type"),"image/jpeg");assert.equal((await avatarResponse.arrayBuffer()).byteLength,4);
   assert.equal((await call("GET", "/api/analytics?from=2026-09-01&to=2026-09-30")).response.status, 200);
   assert.equal((await call("GET", "/api/export/clients.csv?from=2026-09-01&to=2026-09-30")).response.status, 200);
 

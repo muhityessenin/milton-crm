@@ -8,7 +8,7 @@ const now = () => new Date().toISOString();
 const publicUser = (user) => {
   if (!user) return null;
   const { passwordHash, permissionOverrides, scopeOverrides, ...safe } = user;
-  return safe;
+  return { ...safe, avatarUrl:user.avatarUrl?`/api/users/${encodeURIComponent(user.id)}/avatar?v=${encodeURIComponent(user.updatedAt||"")}`:"" };
 };
 
 class HttpError extends Error {

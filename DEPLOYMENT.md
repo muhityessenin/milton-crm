@@ -87,6 +87,12 @@ feed reconnects, the cache is discarded and the configured
 Time-based notification maintenance is coalesced and limited to once per user
 per 30 seconds, avoiding four repeated maintenance queries on rapid refreshes.
 
+Profile photos and the company logo remain in PostgreSQL for compatibility,
+but API payloads expose versioned media URLs instead of repeating base64 data.
+JSON, JavaScript, and CSS responses support gzip. Static assets use ETag
+revalidation, so a deploy is visible immediately while unchanged files return
+`304 Not Modified` instead of being downloaded again.
+
 ## Owner publication panel
 
 Only the global Owner can see or call the publication panel. Add these values

@@ -211,8 +211,12 @@ function normalizePhone(input = "") {
   if (digits.length === 10) digits = `7${digits}`;
   return digits.length === 11 && digits[0] === "7" ? `+${digits}` : `+${digits}`;
 }
-function publicUser(u) { if(!u)return null; const { passwordHash, permissionOverrides, scopeOverrides, ...safe } = u; return safe; }
-function adminUserView(u) { if(!u)return null; const { passwordHash, ...safe } = u; return safe; }
+function publicAvatarUrl(u){return u?.avatarUrl?`/api/users/${encodeURIComponent(u.id)}/avatar?v=${encodeURIComponent(u.updatedAt||"")}`:"";}
+function publicUser(u) { if(!u)return null; const { passwordHash, permissionOverrides, scopeOverrides, ...safe } = u; return {...safe,avatarUrl:publicAvatarUrl(u)}; }
+function adminUserView(u) { if(!u)return null; const { passwordHash, ...safe } = u; return {...safe,avatarUrl:publicAvatarUrl(u)}; }
+function publicBranding(){const value=db.meta.branding||{};return{...value,logoUrl:value.logoUrl?`/api/branding/logo?v=${crypto.createHash("sha1").update(value.logoUrl).digest("hex").slice(0,12)}`:""};}
+function imageData(value){const match=String(value||"").match(/^data:(image\/(?:png|jpeg|webp|svg\+xml));base64,([\s\S]+)$/);if(!match)return null;try{return{type:match[1],buffer:Buffer.from(match[2],"base64")};}catch{return null;}}
+function sendImage(req,res,value){const image=imageData(value);if(!image)return fail(res,404,"Изображение не найдено");const etag=`\"${crypto.createHash("sha1").update(image.buffer).digest("hex")}\"`;if(req.headers["if-none-match"]===etag){res.writeHead(304,{ETag:etag,"Cache-Control":"private, max-age=31536000, immutable"});return res.end();}res.writeHead(200,{"Content-Type":image.type,"Content-Length":String(image.buffer.length),"Cache-Control":"private, max-age=31536000, immutable",ETag:etag,"X-Content-Type-Options":"nosniff","Content-Security-Policy":"default-src 'none'; style-src 'unsafe-inline'; img-src data:"});if(req.method==="HEAD")return res.end();return res.end(image.buffer);}
 function requestMemo(key,build){const context=requestState.getStore();if(!context)return build();context.memo||=new Map();if(!context.memo.has(key))context.memo.set(key,build());return context.memo.get(key);}
 function enrichmentIndexes(){return requestMemo("enrichment-indexes",()=>{
   const activeTrialByClient=new Map(),paymentsByClient=new Map(),latestStatusChange=new Map();
@@ -305,22 +309,40 @@ function dashboard(actor) {
   return { clients: visible.length, todayTrials: trials.length, completed: trials.filter((t) => t.completedAt).length, remaining: trials.filter((t) => new Date(t.scheduledAt) >= new Date()).length, payments: hasPermission(actor,"payments.view")?pays.length:0, revenue: hasPermission(actor,"payments.view")?pays.reduce((n, p) => n + Number(p.amount), 0):0, overdue: visible.map((c)=>enrichClient(c,actor)).filter((c) => c.overdue).length, upcoming: trials.sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt)).map((t) => ({ ...t, client: enrichClient(client(t.clientId),actor) })) };
 }
 
-function bootstrapPayload(actor) {
-  const visibleClients=db.clients.filter((c)=>canSeeClient(actor,c)).map((c)=>enrichClient(c,actor));
-  const archivedClients=hasPermission(actor,"clients.archive")?db.clients.filter((c)=>canSeeArchivedClient(actor,c)).map((c)=>enrichClient(c,actor)):[];
-  const analyticsDimensions=hasPermission(actor,"analytics.view")?{users:analyticsUsersFor(actor).map(publicUser),statuses:db.statuses,leadSources:db.leadSources,tags:db.tags,refusalReasons:db.refusalReasons,paymentMethods:db.paymentMethods}:null;
-  return {me:publicUser(actor),access:effectiveAccess(actor),permissionCatalog:PERMISSION_CATALOG,branding:db.meta.branding,timezone:db.meta.timezone,unassignedReminderMinutes:db.meta.unassignedTrialReminderMinutes||120,dashboard:dashboard(actor),clients:visibleClients,archivedClients,archiveReasons:CLIENT_ARCHIVE_REASONS,unassignedTrials:actor.role==="ADMIN"&&hasPermission(actor,"schedule.assignUnassigned")?unassignedPayload(actor):[],users:db.users.filter((u)=>hasPermission(actor,"users.view")||u.active).map((u)=>hasPermission(actor,"users.managePermissions")?adminUserView(u):publicUser(u)),roles:canManageUserRoles(actor)?db.roles:[],statuses:db.statuses,leadSources:db.leadSources,tags:db.tags,refusalReasons:db.refusalReasons,paymentMethods:db.paymentMethods,analyticsDimensions,notifications:db.notifications.filter((n)=>n.userId===actor.id).slice(-50).reverse()};
+function bootstrapPayload(actor,requested=null) {
+  const wants=(key)=>!requested||requested.has(key),result={};
+  if(wants("me"))result.me=publicUser(actor);
+  if(wants("access"))result.access=effectiveAccess(actor);
+  if(wants("permissionCatalog"))result.permissionCatalog=PERMISSION_CATALOG;
+  if(wants("branding"))result.branding=publicBranding();
+  if(wants("timezone"))result.timezone=db.meta.timezone;
+  if(wants("unassignedReminderMinutes"))result.unassignedReminderMinutes=db.meta.unassignedTrialReminderMinutes||120;
+  if(wants("dashboard"))result.dashboard=dashboard(actor);
+  if(wants("clients"))result.clients=db.clients.filter((c)=>canSeeClient(actor,c)).map((c)=>enrichClient(c,actor));
+  if(wants("archivedClients"))result.archivedClients=hasPermission(actor,"clients.archive")?db.clients.filter((c)=>canSeeArchivedClient(actor,c)).map((c)=>enrichClient(c,actor)):[];
+  if(wants("archiveReasons"))result.archiveReasons=CLIENT_ARCHIVE_REASONS;
+  if(wants("unassignedTrials"))result.unassignedTrials=actor.role==="ADMIN"&&hasPermission(actor,"schedule.assignUnassigned")?unassignedPayload(actor):[];
+  if(wants("users"))result.users=db.users.filter((u)=>hasPermission(actor,"users.view")||u.active).map((u)=>hasPermission(actor,"users.managePermissions")?adminUserView(u):publicUser(u));
+  if(wants("roles"))result.roles=canManageUserRoles(actor)?db.roles:[];
+  if(wants("statuses"))result.statuses=db.statuses;
+  if(wants("leadSources"))result.leadSources=db.leadSources;
+  if(wants("tags"))result.tags=db.tags;
+  if(wants("refusalReasons"))result.refusalReasons=db.refusalReasons;
+  if(wants("paymentMethods"))result.paymentMethods=db.paymentMethods;
+  if(wants("analyticsDimensions"))result.analyticsDimensions=hasPermission(actor,"analytics.view")?{users:analyticsUsersFor(actor).map(publicUser),statuses:db.statuses,leadSources:db.leadSources,tags:db.tags,refusalReasons:db.refusalReasons,paymentMethods:db.paymentMethods}:null;
+  if(wants("notifications"))result.notifications=db.notifications.filter((n)=>n.userId===actor.id).slice(-50).reverse();
+  return result;
 }
 
 function syncPayload(actor,resources){
-  const full=bootstrapPayload(actor);if(resources.has("bootstrap"))return full;
+  if(resources.has("bootstrap"))return bootstrapPayload(actor);
   const keys=new Set(),add=(...items)=>items.forEach((item)=>keys.add(item));
   if(["clients","trials","payments","schedule","analytics"].some((item)=>resources.has(item)))add("dashboard","clients","archivedClients","archiveReasons","unassignedTrials","unassignedReminderMinutes");
   if(resources.has("notifications"))add("notifications");
   if(["users","profile"].some((item)=>resources.has(item)))add("me","access","users","roles","analyticsDimensions");
   if(resources.has("settings"))add("me","access","permissionCatalog","branding","users","roles","analyticsDimensions");
   if(resources.has("references"))add("statuses","leadSources","tags","refusalReasons","paymentMethods","analyticsDimensions");
-  return Object.fromEntries([...keys].map((key)=>[key,full[key]]));
+  return bootstrapPayload(actor,keys);
 }
 
 const dayKey = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : new Intl.DateTimeFormat("en-CA", { timeZone:TZ }).format(new Date(value));
@@ -433,6 +455,12 @@ async function api(req, res, url) {
     }
   }
   if (req.method === "GET" && url.pathname === "/api/events") return realtimeHub.connect(req,res,actor.id);
+  if (["GET","HEAD"].includes(req.method) && /^\/api\/users\/[^/]+\/avatar$/.test(url.pathname)) {
+    const target=user(url.pathname.split("/")[3]);
+    if(!target||(!target.active&&!hasPermission(actor,"users.view")))return fail(res,404,"Изображение не найдено");
+    return sendImage(req,res,target.avatarUrl);
+  }
+  if (["GET","HEAD"].includes(req.method) && url.pathname==="/api/branding/logo") return sendImage(req,res,db.meta.branding?.logoUrl);
   if (req.method === "GET" && /^\/api\/trials\/[^/]+\/receipt$/.test(url.pathname)) {
     const trialId=url.pathname.split("/")[3],trial=db.trials.find((item)=>item.id===trialId),c=trial&&client(trial.clientId);
     if(!trial||!c||!canOpenClient(actor,c)||!hasPermission(actor,"clients.viewHistory")||!trial.receiptStorageKey)return fail(res,404,"Чек не найден");
@@ -489,8 +517,8 @@ async function api(req, res, url) {
   }
   if (req.method === "PUT" && url.pathname === "/api/admin/branding") {
     if (!requirePermission(res,actor,"settings.manageBranding")) return;
-    const input = await body(req); if (!String(input.companyName||"").trim() || !/^#[0-9a-fA-F]{6}$/.test(input.accentColor||"") || !validImageData(input.logoUrl)) return fail(res,422,"Укажите название, корректный цвет и изображение до 1 МБ");
-    const oldValue = { ...db.meta.branding }; db.meta.branding = { companyName:String(input.companyName).trim(), accentColor:input.accentColor, logoUrl:input.logoUrl || "" }; audit(actor.id,"BRANDING","branding","BRANDING_CHANGED",oldValue,db.meta.branding); saveDb(); return json(res,200,db.meta.branding);
+    const input = await body(req),logoUrl=input.logoUrl===undefined?db.meta.branding.logoUrl:input.logoUrl; if (!String(input.companyName||"").trim() || !/^#[0-9a-fA-F]{6}$/.test(input.accentColor||"") || !validImageData(logoUrl)) return fail(res,422,"Укажите название, корректный цвет и изображение до 1 МБ");
+    const oldValue = { ...db.meta.branding }; db.meta.branding = { companyName:String(input.companyName).trim(), accentColor:input.accentColor, logoUrl:logoUrl || "" }; audit(actor.id,"BRANDING","branding","BRANDING_CHANGED",oldValue,db.meta.branding); saveDb(); return json(res,200,publicBranding());
   }
   if(req.method==="PUT"&&url.pathname==="/api/admin/unassigned-settings"){
     if(!requirePermission(res,actor,"settings.manageBranding"))return;const input=await body(req),minutes=Number(input.minutes);if(!Number.isInteger(minutes)||minutes<0||minutes>10080)return fail(res,422,"Укажите порог от 0 до 10080 минут");db.meta.unassignedTrialReminderMinutes=minutes;audit(actor.id,"SETTINGS","unassigned-trials","UNASSIGNED_REMINDER_CHANGED",null,{minutes});saveDb();return json(res,200,{minutes});
