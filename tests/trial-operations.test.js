@@ -7,6 +7,7 @@ const path=require("node:path");
 
 const root=path.join(__dirname,"..");
 const app=fs.readFileSync(path.join(root,"public","app.js"),"utf8");
+const crmViews=fs.readFileSync(path.join(root,"public","crm-views.js"),"utf8");
 const server=fs.readFileSync(path.join(root,"server","application.js"),"utf8");
 const css=fs.readFileSync(path.join(root,"public","styles.css"),"utf8");
 const migration=fs.readFileSync(path.join(root,"migrations","008_trial_operations.sql"),"utf8");
@@ -25,8 +26,9 @@ test("separate unassigned navigation is hidden without deleting legacy flow",()=
 });
 
 test("CRM cards expose operational facts and dynamic date groups",()=>{
-  for(const label of ["Сегодняшние","Запланированные","Ответственный менеджер","Клоузер","Сумма","Статус","Причина"])assert.match(app,new RegExp(label));
-  assert.match(app,/clientPlanDate\(c\)===businessToday/);
+  const crmUiSources=`${app}\n${crmViews}`;
+  for(const label of ["Сегодняшние","Запланированные","Ответственный менеджер","Клоузер","Сумма","Статус","Причина"])assert.match(crmUiSources,new RegExp(label));
+  assert.match(app,/MiltonCrmViews\.boardColumns\(clients,statuses,businessToday\)/);
 });
 
 test("reschedule later and notification snooze UX are present",()=>{
