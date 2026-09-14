@@ -21,6 +21,12 @@ const requirePermission = (actor, key) => {
   const enabled = Object.prototype.hasOwnProperty.call(override, key) ? override[key] === true : actor.accessRole?.permissions?.[key] === true;
   if (!enabled) throw new HttpError(403, "У вас нет прав для этого действия");
 };
+const hasPermission = (actor, key) => {
+  if (!actor) return false;
+  const override = actor.permissionOverrides || {};
+  return Object.prototype.hasOwnProperty.call(override, key) ? override[key] === true : actor.accessRole?.permissions?.[key] === true;
+};
+const paymentStatusPermissionMessage = (statusName) => `Для статуса «${statusName || "Оплата/Чек"}» требуется право «Оплаты → Создание оплаты» (payments.create)`;
 const scopeFor = (actor, resource) => actor.scopeOverrides?.[resource] || actor.accessRole?.scopes?.[resource] || "OWN";
 
 async function actorFor(tx, req) {
@@ -287,7 +293,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           }
           if (action === "status") {
             if (!actor) throw new HttpError(401, "Требуется авторизация");
-            try { requirePermission(actor, "clients.changeStatus"); } catch { requirePermission(actor, "crm.changeStatus"); }
+            if (!hasPermission(actor,"clients.changeStatus")&&!hasPermission(actor,"crm.changeStatus")) throw new HttpError(403,"Для изменения статуса требуется право «Клиенты → Изменение статуса» (clients.changeStatus) или «CRM / Канбан → Изменение статуса» (crm.changeStatus)",{missingPermissions:["clients.changeStatus","crm.changeStatus"]});
             const status = await tx.statuses.findById(input.statusId);
             if (!status?.active) throw new HttpError(422, "Выберите активный статус");
             if (actor.role === "MANAGER" && !["REQUIRE_RESCHEDULE", "MARK_NO_SHOW"].includes(status.actionType)) throw new HttpError(403, "Этот статус может изменить только клоузер");
@@ -301,7 +307,7 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
               await tx.rescheduleTrial({ clientId, actorUserId: actor.id, newSlotId: input.newSlotId, statusId: status.id, reasonId:input.refusalReasonId,rescheduleMode:input.rescheduleMode==="LATER"?"LATER":"NOW",changedAt });
             } else {
               if (paymentAction) {
-                requirePermission(actor, "payments.create");
+                if(!hasPermission(actor,"payments.create"))throw new HttpError(403,paymentStatusPermissionMessage(status.name),{missingPermission:"payments.create"});
                 const amount = Number(input.amount), paymentDate = String(input.paymentDate || ""), key = String(req.headers["idempotency-key"] || input.idempotencyKey || "").trim() || null;
                 if (!(amount > 0) || !(await tx.paymentMethods.findById(input.paymentMethodId))?.active || !/^\d{4}-\d{2}-\d{2}$/.test(paymentDate)) throw new HttpError(422, "Укажите корректную сумму, способ и дату оплаты");
                 if(status.partialPayment){const total=Number(input.totalDealAmount),paidBefore=Number((await tx.db.query("SELECT COALESCE(sum(amount),0) total FROM payments WHERE client_id=$1 AND voided_at IS NULL",[clientId])).rows[0].total);if(!(total>0)||paidBefore+amount>total||!/^\d{4}-\d{2}-\d{2}$/.test(String(input.remainingPaymentDueDate||"")))throw new HttpError(422,"Общая сумма должна быть не меньше всех оплат, укажите дату доплаты");await tx.db.query("UPDATE clients SET total_deal_amount=$2,remaining_payment_due_date=$3,prepayment_started_at=COALESCE(prepayment_started_at,$4) WHERE id=$1",[clientId,total,input.remainingPaymentDueDate,changedAt]);await appendHistory(tx,clientId,actor.id,"PREPAYMENT_UPDATED",null,{paymentAmount:amount,totalDealAmount:total,remainingPaymentDueDate:input.remainingPaymentDueDate},changedAt);}

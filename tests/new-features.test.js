@@ -64,3 +64,9 @@ test("CRM cards add compact prepayment and exact timestamps without replacing ex
   assert.match(css,/\.card-timestamps\{/);
   assert.match(css,/\.prepayment-card\{/);
 });
+
+test("Roles UI names the payment permission required by payment statuses", () => {
+  const app=fs.readFileSync(path.join(__dirname,"..","public","app.js"),"utf8");
+  assert.match(app,/['"]payments\.create['"]\s*:\s*['"]Создание оплаты \(для статуса Оплата\/Чек\)['"]/);
+  assert.match(app,/Недостающее право: «Оплаты → Создание оплаты» \(payments\.create\)/);
+});
