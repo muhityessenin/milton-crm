@@ -200,7 +200,7 @@ function setStorageForTests(next) {
 function setVpsDeploymentServiceForTests(next) { vpsDeploymentService=next; }
 function saveDb() {
   const context=requestState.getStore();
-  if(context){context.dirty=true;return;}
+  if(context){context.dirty=true;context.memo?.clear();return;}
   if(STORAGE_CONFIG.backend!=="json")throw new Error("saveDb must run inside a storage transaction");
   jsonStorage.replaceState(fallbackDb);jsonStorage.save();
 }
@@ -213,6 +213,14 @@ function normalizePhone(input = "") {
 }
 function publicUser(u) { if(!u)return null; const { passwordHash, permissionOverrides, scopeOverrides, ...safe } = u; return safe; }
 function adminUserView(u) { if(!u)return null; const { passwordHash, ...safe } = u; return safe; }
+function requestMemo(key,build){const context=requestState.getStore();if(!context)return build();context.memo||=new Map();if(!context.memo.has(key))context.memo.set(key,build());return context.memo.get(key);}
+function enrichmentIndexes(){return requestMemo("enrichment-indexes",()=>{
+  const activeTrialByClient=new Map(),paymentsByClient=new Map(),latestStatusChange=new Map();
+  for(const trial of db.trials)if(trial.active&&!activeTrialByClient.has(trial.clientId))activeTrialByClient.set(trial.clientId,trial);
+  for(const payment of db.payments)if(!payment.voidedAt){const rows=paymentsByClient.get(payment.clientId)||[];rows.push(payment);paymentsByClient.set(payment.clientId,rows);}
+  for(const item of db.history)if(item.eventType==="STATUS_CHANGED"&&item.newValue?.statusId){const key=`${item.clientId}:${item.newValue.statusId}`,current=latestStatusChange.get(key);if(!current||String(item.createdAt)>String(current))latestStatusChange.set(key,item.createdAt);}
+  return{activeTrialByClient,paymentsByClient,latestStatusChange,users:new Map(db.users.map((row)=>[row.id,row])),statuses:new Map(db.statuses.map((row)=>[row.id,row])),reasons:new Map(db.refusalReasons.map((row)=>[row.id,row])),sources:new Map(db.leadSources.map((row)=>[row.id,row])),tags:new Map(db.tags.map((row)=>[row.id,row])),tagOrder:new Map(db.tags.map((row,index)=>[row.id,index]))};
+});}
 function status(id) { return db.statuses.find((x) => x.id === id); }
 function user(id) { return db.users.find((x) => x.id === id); }
 function client(id) { return db.clients.find((x) => x.id === id); }
@@ -237,13 +245,13 @@ function canOpenClient(actor,c){return canSeeClient(actor,c)||canSeeArchivedClie
 function userMatchesScope(actor,targetUserId,resource) { const scope=scopeFor(actor,resource); return scope==="ALL" || (scope==="TEAM"&&belongsToTeam(actor,targetUserId)) || targetUserId===actor.id; }
 function analyticsUsersFor(actor){const scope=scopeFor(actor,"analytics");if(scope==="ALL")return db.users;const ids=new Set([actor.id]);for(const c of db.clients.filter((item)=>clientMatchesScope(actor,item,"analytics"))){ids.add(c.currentManagerId);ids.add(c.currentCloserId);}if(scope==="TEAM")for(const account of db.users)if(belongsToTeam(actor,account.id))ids.add(account.id);return db.users.filter((account)=>ids.has(account.id));}
 function enrichClient(c,viewer=null) {
-  const activeTrial = db.trials.find((t) => t.clientId === c.id && t.active);
-  const allPayments = !viewer || hasPermission(viewer,"payments.view") ? db.payments.filter((p) => p.clientId === c.id && !p.voidedAt) : [];
+  const indexes=enrichmentIndexes(),activeTrial=indexes.activeTrialByClient.get(c.id);
+  const allPayments = !viewer || hasPermission(viewer,"payments.view") ? (indexes.paymentsByClient.get(c.id)||[]) : [];
   const overdue = activeTrial?.assignmentState!=="UNASSIGNED" && activeTrial?.scheduledAt && new Date(activeTrial.scheduledAt).getTime() + 3600000 < Date.now() && c.currentStatusId === activeTrial.statusAtBookingId;
   const paymentTotal=allPayments.reduce((n,p)=>n+Number(p.amount),0),totalDealAmount=Number(c.totalDealAmount||0),remainingAmount=Math.max(0,totalDealAmount-paymentTotal);
-  const statusChangedAt=c.statusChangedAt||db.history.filter((item)=>item.clientId===c.id&&item.eventType==="STATUS_CHANGED"&&item.newValue?.statusId===c.currentStatusId).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)))[0]?.createdAt||c.createdAt;
+  const statusChangedAt=c.statusChangedAt||indexes.latestStatusChange.get(`${c.id}:${c.currentStatusId}`)||c.createdAt;
   const prepayment=totalDealAmount>0?{totalDealAmount,paymentTotal,remainingAmount,dueDate:c.remainingPaymentDueDate||null,startedAt:c.prepaymentStartedAt||null,active:remainingAmount>0}:null;
-  return { ...c,statusChangedAt, manager: publicUser(user(c.currentManagerId)), closer: publicUser(user(c.currentCloserId))||{id:null,name:"Без клоузера",role:"CLOSER",avatarUrl:""}, originalManager: publicUser(user(c.originalManagerId)), archivedBy:publicUser(user(c.archivedByUserId)),archiveReasonLabel:CLIENT_ARCHIVE_REASONS[c.archiveReason]||c.archiveReason||null,status: status(c.currentStatusId), currentReason:db.refusalReasons.find((x)=>x.id===c.currentReasonId)||null, leadSource: db.leadSources.find((x) => x.id === c.leadSourceId), tags: db.tags.filter((x) => c.tagIds.includes(x.id)), activeTrial, payments: allPayments, paymentTotal,prepayment, overdue: Boolean(overdue) };
+  return { ...c,statusChangedAt, manager: publicUser(indexes.users.get(c.currentManagerId)), closer: publicUser(indexes.users.get(c.currentCloserId))||{id:null,name:"Без клоузера",role:"CLOSER",avatarUrl:""}, originalManager: publicUser(indexes.users.get(c.originalManagerId)), archivedBy:publicUser(indexes.users.get(c.archivedByUserId)),archiveReasonLabel:CLIENT_ARCHIVE_REASONS[c.archiveReason]||c.archiveReason||null,status:indexes.statuses.get(c.currentStatusId),currentReason:indexes.reasons.get(c.currentReasonId)||null,leadSource:indexes.sources.get(c.leadSourceId),tags:(c.tagIds||[]).map((id)=>indexes.tags.get(id)).filter(Boolean).sort((a,b)=>indexes.tagOrder.get(a.id)-indexes.tagOrder.get(b.id)),activeTrial,payments:allPayments,paymentTotal,prepayment,overdue:Boolean(overdue) };
 }
 function canSeeUnassigned(actor,trial){const c=client(trial.clientId);return Boolean(c&&trial.active&&trial.assignmentState==="UNASSIGNED"&&canSeeClient(actor,c)&&hasPermission(actor,"schedule.assignUnassigned"));}
 function unassignedPayload(actor){return db.trials.filter((trial)=>canSeeUnassigned(actor,trial)).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).map((trial)=>{const c=enrichClient(client(trial.clientId),actor);return{...trial,client:c,manager:publicUser(user(trial.managerId)),waitingSeconds:Math.max(0,Math.floor((Date.now()-new Date(trial.createdAt).getTime())/1000)),receiptUrl:trial.receiptStorageKey?`/api/trials/${trial.id}/receipt`:null};});}
@@ -290,9 +298,10 @@ function ensureOperationalNotifications(actor){
 function dashboard(actor) {
   const visible = db.clients.filter((c) => canSeeClient(actor, c));
   const paymentClients = db.clients.filter((c) => !c.archivedAt&&!c.permanentlyDeletedAt&&clientMatchesScope(actor,c,"payments"));
+  const visibleIds=new Set(visible.map((c)=>c.id)),paymentClientIds=new Set(paymentClients.map((c)=>c.id));
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(new Date());
-  const trials = db.trials.filter((t) => visible.some((c) => c.id === t.clientId) && new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(new Date(t.scheduledAt)) === today);
-  const pays = db.payments.filter((p) => paymentClients.some((c) => c.id === p.clientId) && p.paymentDate === today && !p.voidedAt);
+  const trials = db.trials.filter((t) => visibleIds.has(t.clientId) && t.scheduledAt && dayKey(t.scheduledAt) === today);
+  const pays = db.payments.filter((p) => paymentClientIds.has(p.clientId) && p.paymentDate === today && !p.voidedAt);
   return { clients: visible.length, todayTrials: trials.length, completed: trials.filter((t) => t.completedAt).length, remaining: trials.filter((t) => new Date(t.scheduledAt) >= new Date()).length, payments: hasPermission(actor,"payments.view")?pays.length:0, revenue: hasPermission(actor,"payments.view")?pays.reduce((n, p) => n + Number(p.amount), 0):0, overdue: visible.map((c)=>enrichClient(c,actor)).filter((c) => c.overdue).length, upcoming: trials.sort((a, b) => a.scheduledAt.localeCompare(b.scheduledAt)).map((t) => ({ ...t, client: enrichClient(client(t.clientId),actor) })) };
 }
 
@@ -356,9 +365,10 @@ function permittedScheduleClosers(actor){
   return db.users.filter((account)=>account.active&&account.role==="CLOSER"&&(account.id===actor.id||(mayViewOthers&&userMatchesScope(actor,account.id,"schedule"))));
 }
 function scheduleSlotPayload(slot,actor){
-  const events=db.trials.filter((trial)=>trial.slotId===slot.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).map((trial)=>{
-    const next=trial.attendanceOutcome==="RESCHEDULED"?db.trials.filter((candidate)=>candidate.clientId===trial.clientId&&candidate.id!==trial.id&&candidate.createdAt>=trial.resultAt).sort((a,b)=>a.createdAt.localeCompare(b.createdAt))[0]:null;
-    const visibleClient=client(trial.clientId),mayOpen=visibleClient&&canOpenClient(actor,visibleClient),manager=user(trial.managerId);
+  const indexes=requestMemo("schedule-indexes",()=>{const bySlot=new Map(),byClient=new Map(),clients=new Map(db.clients.map((row)=>[row.id,row])),users=new Map(db.users.map((row)=>[row.id,row]));for(const trial of db.trials){const slotRows=bySlot.get(trial.slotId)||[];slotRows.push(trial);bySlot.set(trial.slotId,slotRows);const clientRows=byClient.get(trial.clientId)||[];clientRows.push(trial);byClient.set(trial.clientId,clientRows);}for(const rows of bySlot.values())rows.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));for(const rows of byClient.values())rows.sort((a,b)=>a.createdAt.localeCompare(b.createdAt));return{bySlot,byClient,clients,users};});
+  const events=(indexes.bySlot.get(slot.id)||[]).map((trial)=>{
+    const next=trial.attendanceOutcome==="RESCHEDULED"?(indexes.byClient.get(trial.clientId)||[]).find((candidate)=>candidate.id!==trial.id&&candidate.createdAt>=trial.resultAt):null;
+    const visibleClient=indexes.clients.get(trial.clientId),mayOpen=visibleClient&&canOpenClient(actor,visibleClient),manager=indexes.users.get(trial.managerId);
     return{id:trial.id,clientId:mayOpen?trial.clientId:null,clientName:mayOpen?visibleClient.name:null,slotId:trial.slotId,scheduledAt:trial.scheduledAt,active:trial.active,resultStatusId:trial.resultStatusId||null,attendanceOutcome:trial.attendanceOutcome||null,statusName:displayTrialStatus(trial),manager:manager?publicUser(manager):null,rescheduledTo:next?{trialId:next.id,scheduledAt:next.scheduledAt}:null};
   });
   const booked=events.find((trial)=>trial.id===slot.bookedTrialId);

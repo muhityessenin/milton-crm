@@ -80,6 +80,13 @@ data is stored in the named `postgres_data` volume. Paid-trial receipt files are
 stored separately in the named `receipt_files` volume; PostgreSQL stores only
 their protected metadata/reference. Both volumes survive app rebuilds/restarts.
 
+The PostgreSQL read model stays hot while its `LISTEN/NOTIFY` change feed is
+connected and is invalidated immediately after committed changes. If the change
+feed reconnects, the cache is discarded and the configured
+`PG_STATE_CACHE_TTL_MS` (5000 ms by default) is used as the safety fallback.
+Time-based notification maintenance is coalesced and limited to once per user
+per 30 seconds, avoiding four repeated maintenance queries on rapid refreshes.
+
 ## Owner publication panel
 
 Only the global Owner can see or call the publication panel. Add these values
