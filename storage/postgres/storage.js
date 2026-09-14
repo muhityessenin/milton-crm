@@ -62,10 +62,10 @@ class PostgresStorage {
   async assertSchema() {
     const result = await this.db.query(`
       SELECT version FROM public.schema_migrations
-      WHERE version IN ('001', '002', '003', '004', '005', '006', '007') ORDER BY version
+      WHERE version IN ('001', '002', '003', '004', '005', '006', '007', '008') ORDER BY version
     `);
-    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007") {
-      throw new Error("Milton PostgreSQL migrations 001 through 007 are required");
+    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007,008") {
+      throw new Error("Milton PostgreSQL migrations 001 through 008 are required");
     }
   }
 
@@ -192,7 +192,9 @@ class PostgresStorage {
     `, [userId]);
     const unassigned=await this.db.query(`
       INSERT INTO notifications(id,user_id,client_id,trial_id,type,content)
-      SELECT 'notif_'||substr(replace(gen_random_uuid()::text,'-',''),1,8),$1,t.client_id,t.id,'UNASSIGNED_TRIAL_OVERDUE',c.name||' · пробный ожидает назначения'
+      SELECT 'notif_'||substr(replace(gen_random_uuid()::text,'-',''),1,8),$1,t.client_id,t.id,
+        CASE WHEN t.pending_reschedule THEN 'TRIAL_RESCHEDULE_PENDING' ELSE 'UNASSIGNED_TRIAL_OVERDUE' END,
+        c.name||CASE WHEN t.pending_reschedule THEN ' · пробный ожидает нового времени' ELSE ' · пробный ожидает назначения' END
       FROM trials t JOIN clients c ON c.id=t.client_id CROSS JOIN app_settings s JOIN users viewer ON viewer.id=$1
       WHERE t.active AND t.assignment_state='UNASSIGNED' AND c.archived_at IS NULL
         AND s.unassigned_trial_reminder_minutes>0
@@ -271,8 +273,9 @@ class PostgresStorage {
       if (!clientResult.rowCount) throw Object.assign(new Error("Клиент не найден"), { code: "CLIENT_NOT_FOUND" });
       const client = camelRow(clientResult.rows[0]);
       const oldTrial = await tx.trials.findActiveByClient(input.clientId, { forUpdate: true });
-      const newSlot = await tx.availabilitySlots.lockById(input.newSlotId);
-      if (!newSlot || newSlot.status !== "FREE" || newSlot.closerId !== client.currentCloserId) {
+      const later=input.rescheduleMode==="LATER";
+      const newSlot = later?null:await tx.availabilitySlots.lockById(input.newSlotId);
+      if (!later&&(!newSlot || newSlot.status !== "FREE" || newSlot.closerId !== client.currentCloserId)) {
         throw Object.assign(new Error("Выбранное время недоступно"), { code: "SLOT_UNAVAILABLE" });
       }
       const changedAt = input.changedAt || now();
@@ -284,16 +287,27 @@ class PostgresStorage {
           attendanceOutcome: "RESCHEDULED",
         });
       }
-      const trial = await tx.trials.create({
+      const trial = await tx.trials.create(later?{
+        ...oldTrial,id:input.trialId||id("trial"),clientId:client.id,managerId:client.currentManagerId,
+        closerId:null,slotId:null,scheduledAt:null,completedAt:null,resultStatusId:null,resultAt:null,
+        resultActorUserId:null,attendanceOutcome:null,active:true,createdAt:changedAt,assignmentState:"UNASSIGNED",
+        assignedAt:null,assignedByUserId:null,assignmentVersion:1,pendingReschedule:true,
+        rescheduleReasonId:input.reasonId,rescheduleFromTrialId:oldTrial?.id||null,
+        previousCloserId:oldTrial?.closerId||client.currentCloserId,pendingRescheduleAt:changedAt,
+        pendingRescheduleByUserId:input.actorUserId,
+      }:{
         id: input.trialId || id("trial"), clientId: client.id,
         managerId: client.currentManagerId, closerId: client.currentCloserId,
         slotId: newSlot.id, scheduledAt: newSlot.startAt,
         statusAtBookingId: input.statusId, active: true, createdAt: changedAt,
+        assignmentState:"SCHEDULED",rescheduleReasonId:input.reasonId,rescheduleFromTrialId:oldTrial?.id||null,
+        previousCloserId:oldTrial?.closerId||client.currentCloserId,
       });
-      await tx.clients.updateStatus(client.id, input.statusId);
-      await tx.history.append({ id: input.historyId || id("hist"), clientId: client.id, actorUserId: input.actorUserId, eventType: "TRIAL_RESCHEDULED", oldValue: oldTrial && { trialId: oldTrial.id, scheduledAt: oldTrial.scheduledAt }, newValue: { trialId: trial.id, scheduledAt: trial.scheduledAt }, createdAt: changedAt });
-      for (const userId of new Set([client.currentManagerId, client.currentCloserId])) {
-        await tx.notifications.create({ id: id("notif"), userId, clientId: client.id, trialId: trial.id, type: "TRIAL_RESCHEDULED", content: `${client.name} · ${trial.scheduledAt}`, createdAt: changedAt });
+      await tx.db.query("UPDATE clients SET current_status_id=$2,current_reason_id=$3,updated_at=$4 WHERE id=$1",[client.id,input.statusId,input.reasonId,changedAt]);
+      await tx.history.append({ id: input.historyId || id("hist"), clientId: client.id, actorUserId: input.actorUserId, eventType: later?"TRIAL_RESCHEDULE_PENDING":"TRIAL_RESCHEDULED", oldValue: oldTrial && { trialId: oldTrial.id, scheduledAt: oldTrial.scheduledAt, closerId:oldTrial.closerId }, newValue: { trialId: trial.id, scheduledAt: trial.scheduledAt, reasonId:input.reasonId }, createdAt: changedAt });
+      const recipients=later?(await tx.db.query("SELECT id FROM users WHERE active AND business_role='ADMIN'")).rows.map((row)=>row.id):[client.currentManagerId,client.currentCloserId];
+      for (const userId of new Set(recipients.filter(Boolean))) {
+        await tx.notifications.create({ id: id("notif"), userId, clientId: client.id, trialId: trial.id, type: later?"TRIAL_RESCHEDULE_PENDING":"TRIAL_RESCHEDULED", content: later?`${client.name} · пробный ожидает нового времени`:`${client.name} · ${trial.scheduledAt}`, createdAt: changedAt });
       }
       return trial;
     });

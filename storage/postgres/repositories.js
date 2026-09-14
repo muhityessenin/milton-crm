@@ -161,14 +161,14 @@ class ClientsRepository extends SqlRepository {
       INSERT INTO public.clients (
         id, name, normalized_phone, original_phone, original_manager_id, current_manager_id,
         current_closer_id, current_status_id, lead_source_id, registration_comment,
-        archived_at, archived_by_user_id, archive_reason, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,now()),COALESCE($15,now()))
+        archived_at, archived_by_user_id, archive_reason, current_reason_id, created_at, updated_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,now()),COALESCE($16,now()))
       RETURNING *
     `, [
       value.id, value.name, value.normalizedPhone, value.originalPhone,
       value.originalManagerId, value.currentManagerId, value.currentCloserId,
       value.currentStatusId, value.leadSourceId || null, value.registrationComment || "",
-      value.archivedAt || null, value.archivedByUserId || null, value.archiveReason || null,
+      value.archivedAt || null, value.archivedByUserId || null, value.archiveReason || null, value.currentReasonId || null,
       value.createdAt || null, value.updatedAt || null,
     ]);
     await this.replaceTags(value.id, value.tagIds || []);
@@ -229,9 +229,12 @@ class TrialsRepository extends SqlRepository {
         receipt_storage_key, receipt_original_name, receipt_mime_type,
         receipt_size_bytes, receipt_uploaded_at, assignment_state, preferred_time_text,
         preferred_date, preferred_start_time, preferred_end_time, assigned_at,
-        assigned_by_user_id, assignment_version
+        assigned_by_user_id, assignment_version, pending_reschedule,
+        reschedule_reason_id, reschedule_from_trial_id, previous_closer_id,
+        pending_reschedule_at, pending_reschedule_by_user_id
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,COALESCE($15,now()),
-        $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+        $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,
+        $33,$34,$35,$36,$37,$38)
       RETURNING *
     `, [
       value.id, value.clientId, value.managerId, value.closerId, value.slotId,
@@ -246,6 +249,9 @@ class TrialsRepository extends SqlRepository {
       value.assignmentState || "SCHEDULED", value.preferredTimeText || null,
       value.preferredDate || null, value.preferredStartTime || null, value.preferredEndTime || null,
       value.assignedAt || null, value.assignedByUserId || null, Number(value.assignmentVersion || 1),
+      Boolean(value.pendingReschedule), value.rescheduleReasonId || null,
+      value.rescheduleFromTrialId || null, value.previousCloserId || null,
+      value.pendingRescheduleAt || null, value.pendingRescheduleByUserId || null,
     ]);
     return camelRow(result.rows[0]);
   }
@@ -253,6 +259,7 @@ class TrialsRepository extends SqlRepository {
     const result = await this.db.query(`
       UPDATE public.trials SET
         active = false,
+        pending_reschedule = false,
         completed_at = COALESCE($2, completed_at),
         result_status_id = COALESCE($3, result_status_id),
         result_at = COALESCE($4, result_at),
@@ -384,10 +391,10 @@ class NotificationsRepository extends SqlRepository {
   }
   async create(value) {
     const result = await this.db.query(`
-      INSERT INTO public.notifications (id, user_id, client_id, trial_id, type, content, read_at, created_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,now()))
+      INSERT INTO public.notifications (id, user_id, client_id, trial_id, type, content, read_at, snoozed_until, resolved_at, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,now()),COALESCE($11,now()))
       ON CONFLICT DO NOTHING RETURNING *
-    `, [value.id, value.userId, value.clientId || null, value.trialId || null, value.type, value.content, value.readAt || null, value.createdAt || null]);
+    `, [value.id, value.userId, value.clientId || null, value.trialId || null, value.type, value.content, value.readAt || null, value.snoozedUntil || null, value.resolvedAt || null, value.createdAt || null, value.updatedAt || null]);
     return result.rowCount ? camelRow(result.rows[0]) : null;
   }
   async markRead(id, userId, readAt = new Date().toISOString()) {
@@ -396,6 +403,19 @@ class NotificationsRepository extends SqlRepository {
       [id, userId, readAt]
     );
     return result.rowCount ? camelRow(result.rows[0]) : null;
+  }
+  async snooze(id, userId, snoozedUntil) {
+    const result = await this.db.query(
+      "UPDATE public.notifications SET snoozed_until=$3,updated_at=now() WHERE id=$1 AND user_id=$2 AND resolved_at IS NULL RETURNING *",
+      [id, userId, snoozedUntil]
+    );
+    return result.rowCount ? camelRow(result.rows[0]) : null;
+  }
+  async resolveForTrial(trialId, type, resolvedAt = new Date().toISOString()) {
+    return rows(await this.db.query(
+      "UPDATE public.notifications SET resolved_at=$3,snoozed_until=NULL,updated_at=$3 WHERE trial_id=$1 AND type=$2 AND resolved_at IS NULL RETURNING *",
+      [trialId, type, resolvedAt]
+    ));
   }
 }
 
