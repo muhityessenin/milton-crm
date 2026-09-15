@@ -5,15 +5,15 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.MiltonCrmViews = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function createCrmViews() {
-  const TODAY = "date:today";
-  const PLANNED = "date:planned";
+  const TODAY = "status:st_today";
+  const PLANNED = "status:st_scheduled";
 
   function configuredStatuses(statuses = []) {
     return [...statuses].sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
   }
 
   function activeStatuses(statuses = []) {
-    return configuredStatuses(statuses).filter((status) => status.active !== false);
+    return configuredStatuses(statuses).filter((status) => status.active !== false && !status.deletedAt);
   }
 
   function statusById(statuses, id) {
@@ -25,6 +25,8 @@
       || configuredStatuses(statuses).find((status) => status.actionType === "REQUIRE_PAYMENT")
       || null;
   }
+
+  function operationalStatus(statuses,key){return configuredStatuses(statuses).find((status)=>status.systemKey===key)||(key==="TODAY"?statusById(statuses,"st_today"):statusById(statuses,"st_scheduled"));}
 
   function hasMainCoursePayment(client) {
     return Number(client?.paymentTotal || 0) > 0;
@@ -45,7 +47,7 @@
 
   function isNeutralActiveTrial(client, status) {
     const trial = client?.activeTrial;
-    return Boolean(trial && !trial.pendingReschedule && status && status.actionType === "NONE" && trial.statusAtBookingId === status.id);
+    return Boolean(trial && !trial.pendingReschedule && status && status.actionType === "NONE" && ["TODAY","PLANNED"].includes(status.systemKey) || trial && !trial.pendingReschedule && ["st_today","st_scheduled"].includes(status?.id));
   }
 
   function boardColumnKey(client, statuses, businessToday) {
@@ -53,21 +55,19 @@
     if (hasMainCoursePayment(client)) return status ? `status:${status.id}` : "status:unknown";
     if (isNeutralActiveTrial(client, status)) {
       const date = trialDate(client);
-      if (date === businessToday) return TODAY;
-      if (!date || date > businessToday) return PLANNED;
+      const operational=date===businessToday?operationalStatus(statuses,"TODAY"):operationalStatus(statuses,"PLANNED");
+      if(operational&&(!date||date>=businessToday))return `status:${operational.id}`;
     }
     return status ? `status:${status.id}` : "status:unknown";
   }
 
   function boardColumns(clients, statuses, businessToday) {
     const configured = configuredStatuses(statuses);
-    const configuredIds = new Set(configured.map((status) => status.id));
+    const visibleConfigured=configured.filter((status)=>!status.deletedAt),configuredIds = new Set(visibleConfigured.map((status) => status.id));
     const legacyStatuses = clients.map((client) => effectiveStatus(client, statuses)).filter((status) => status?.id && !configuredIds.has(status.id));
     const uniqueLegacyStatuses = [...new Map(legacyStatuses.map((status) => [status.id, status])).values()];
     const definitions = [
-      { key: TODAY, title: "Сегодняшние", color: "#14a06f", status: null },
-      { key: PLANNED, title: "Запланированные", color: "#3157d5", status: null },
-      ...configured.map((status) => ({ key: `status:${status.id}`, title: status.name, color: status.color || "#7c879e", status })),
+      ...visibleConfigured.map((status) => ({ key: `status:${status.id}`, title: status.name, color: status.color || "#7c879e", status })),
       ...uniqueLegacyStatuses.map((status) => ({ key: `status:${status.id}`, title: status.name || "Другой статус", color: status.color || "#7c879e", status })),
     ];
     if (clients.some((client) => boardColumnKey(client, statuses, businessToday) === "status:unknown")) {
@@ -94,5 +94,5 @@
     return [...groups.entries()].map(([title, items]) => ({ title, clients: items }));
   }
 
-  return { TODAY, PLANNED, configuredStatuses, activeStatuses, effectiveStatus, hasMainCoursePayment, trialDate, boardColumnKey, boardColumns, groupClients };
+  return { TODAY, PLANNED, configuredStatuses, activeStatuses, operationalStatus, effectiveStatus, hasMainCoursePayment, trialDate, boardColumnKey, boardColumns, groupClients };
 });

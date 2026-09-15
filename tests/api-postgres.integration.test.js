@@ -95,7 +95,7 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   result=await call("POST",`/api/clients/${clientId}/status`,paymentInput,paymentHeaders);
   assert.equal(result.response.status,200);
   assert.equal((await call("POST",`/api/clients/${clientId}/status`,paymentInput,paymentHeaders)).response.status,200);
-  const occupied=(await call("GET","/api/slots?closerId=usr_closer")).body.find((item)=>item.id===slot.id);assert.equal(occupied.status,"OCCUPIED");assert.equal(occupied.events[0].statusName,"Чек");
+  const occupied=(await call("GET","/api/slots?closerId=usr_closer")).body.find((item)=>item.id===slot.id);assert.equal(occupied.status,"OCCUPIED");assert.equal(occupied.events[0].crmStatus.id,"st_payment");assert.equal(occupied.events[0].crmStatus.color,"#087F5B");
   assert.equal((await call("DELETE",`/api/slots/${slot.id}`)).response.status,409);
   progress("payment");
   result=await call("GET",`/api/clients/${clientId}`);assert.equal(result.body.payments.length,1);const paymentId=result.body.payments[0].id;assert.ok(paymentId);
@@ -109,6 +109,10 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   result=await call("POST",`/api/clients/${clientId}/notes`,{text:"PostgreSQL timestamp note"});assert.equal(result.response.status,201);result=await call("GET",`/api/clients/${clientId}`);assert.equal(new Date(result.body.client.statusChangedAt).getTime(),new Date(statusChangedAt).getTime());
   result=await call("POST",`/api/clients/${clientId}/status`,{statusId:prepaymentStatus.id,amount:9000,totalDealAmount:80000,remainingPaymentDueDate:"2026-09-01",paymentMethodId:"method_1",paymentDate:"2026-09-02"},{"Idempotency-Key":"postgres-api-prepayment-2"});assert.equal(result.response.status,200);assert.equal(result.body.prepayment.remainingAmount,0);assert.equal(result.body.prepayment.active,false);assert.equal(new Date(result.body.statusChangedAt).getTime(),new Date(statusChangedAt).getTime());
   result=await call("GET","/api/bootstrap");assert.ok(result.body.notifications.some(item=>item.clientId===clientId&&item.type==="PREPAYMENT_BALANCE_DUE"&&item.resolvedAt));
+  result=await call("GET",`/api/clients/${clientId}`);const accidentalPayment=result.body.payments.find(payment=>Number(payment.amount)===9000);assert.ok(accidentalPayment);
+  assert.equal((await callAs(closerToken,"DELETE",`/api/payments/${accidentalPayment.id}`,{confirmed:true})).response.status,403);
+  result=await call("DELETE",`/api/payments/${accidentalPayment.id}`,{confirmed:true});assert.equal(result.response.status,200);assert.equal(result.body.deleted,true);
+  result=await call("GET",`/api/clients/${clientId}`);assert.equal(result.body.client.prepayment.remainingAmount,9000);assert.ok(result.body.payments.some(payment=>payment.id===accidentalPayment.id&&payment.voidedAt));assert.ok(result.body.history.some(entry=>entry.eventType==="PAYMENT_DELETED"));
   progress("prepayment");
 
   assert.equal((await call("POST",`/api/clients/${clientId}/archive`,{reason:"TEST"})).response.status,200);

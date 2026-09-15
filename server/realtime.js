@@ -7,7 +7,7 @@ const RESOURCE_RULES = [
   [/^\/api\/slots(?:\/|$)/, ["schedule"]],
   [/^\/api\/payments(?:\/|$)/, ["payments", "clients", "notifications", "analytics"]],
   [/^\/api\/notifications(?:\/|$)/, ["notifications"]],
-  [/^\/api\/admin\/config(?:\/|$)/, ["references", "clients", "analytics"]],
+  [/^\/api\/admin\/config(?:\/|$)/, ["references", "clients", "schedule", "analytics"]],
   [/^\/api\/trials(?:\/|$)/, ["trials","clients","schedule","notifications","analytics"]],
   [/^\/api\/admin\/(?:branding|users|roles)(?:\/|$)/, ["settings", "users", "clients", "schedule"]],
   [/^\/api\/profile$/, ["profile", "users"]],

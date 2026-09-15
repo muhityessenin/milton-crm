@@ -70,3 +70,15 @@ test("Roles UI names the payment permission required by payment statuses", () =>
   assert.match(app,/['"]payments\.create['"]\s*:\s*['"]Создание оплаты \(для статуса Оплата\/Чек\)['"]/);
   assert.match(app,/Недостающее право: «Оплаты → Создание оплаты» \(payments\.create\)/);
 });
+
+test("operational-status migration is additive and grants payment deletion only to Admin",()=>{
+  const sql=fs.readFileSync(path.join(__dirname,"..","migrations","010_operational_statuses_and_safe_reference_delete.sql"),"utf8");
+  assert.match(sql,/system_key/);assert.match(sql,/deleted_at/);assert.match(sql,/payments\.delete/);assert.match(sql,/WHERE system_key='ADMIN'/);
+  assert.doesNotMatch(sql,/\b(?:DROP TABLE|DROP COLUMN|TRUNCATE|DELETE FROM)\b/i);
+});
+
+test("Schedule uses the configured CRM status name and color",()=>{
+  const app=fs.readFileSync(path.join(__dirname,"..","public","app.js"),"utf8"),css=fs.readFileSync(path.join(__dirname,"..","public","styles.css"),"utf8");
+  assert.match(app,/event\.crmStatus\?displayName\(event\.crmStatus\)/);assert.match(app,/event\.crmStatus\?\.color/);assert.match(css,/--event-status/);
+  assert.match(app,/['"]payments\.delete['"]\s*:\s*['"]Удаление оплат['"]/);
+});

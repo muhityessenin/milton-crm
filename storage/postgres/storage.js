@@ -64,10 +64,10 @@ class PostgresStorage {
   async assertSchema() {
     const result = await this.db.query(`
       SELECT version FROM public.schema_migrations
-      WHERE version IN ('001', '002', '003', '004', '005', '006', '007', '008', '009') ORDER BY version
+      WHERE version IN ('001', '002', '003', '004', '005', '006', '007', '008', '009', '010') ORDER BY version
     `);
-    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007,008,009") {
-      throw new Error("Milton PostgreSQL migrations 001 through 009 are required");
+    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007,008,009,010") {
+      throw new Error("Milton PostgreSQL migrations 001 through 010 are required");
     }
   }
 
@@ -194,6 +194,30 @@ class PostgresStorage {
 
   async refreshOperationalNotificationsFor(userId) {
     if (!userId) return 0;
+    const statusChanges=await this.db.query(`
+      WITH candidates AS (
+        SELECT c.id client_id,c.current_status_id old_status_id,desired.id new_status_id,c.current_manager_id actor_id,t.id trial_id
+        FROM clients c JOIN statuses current_status ON current_status.id=c.current_status_id
+        JOIN trials t ON t.client_id=c.id AND t.active AND NOT t.pending_reschedule
+        JOIN LATERAL (
+          SELECT id FROM statuses
+          WHERE system_key=CASE WHEN COALESCE(t.preferred_date,(t.scheduled_at AT TIME ZONE 'Asia/Almaty')::date)=(now() AT TIME ZONE 'Asia/Almaty')::date THEN 'TODAY' ELSE 'PLANNED' END
+            AND deleted_at IS NULL LIMIT 1
+        ) desired ON true
+        WHERE c.archived_at IS NULL AND current_status.system_key IN ('TODAY','PLANNED') AND c.current_status_id<>desired.id
+      ), updated_clients AS (
+        UPDATE clients c SET current_status_id=x.new_status_id,status_changed_at=now(),updated_at=now()
+        FROM candidates x WHERE c.id=x.client_id RETURNING c.id
+      ), updated_trials AS (
+        UPDATE trials t SET status_at_booking_id=x.new_status_id,updated_at=now()
+        FROM candidates x WHERE t.id=x.trial_id RETURNING t.id
+      ), history_rows AS (
+        INSERT INTO client_history(id,client_id,actor_user_id,event_type,old_value,new_value)
+        SELECT 'hist_'||substr(replace(gen_random_uuid()::text,'-',''),1,8),client_id,actor_id,'STATUS_CHANGED',jsonb_build_object('statusId',old_status_id),jsonb_build_object('statusId',new_status_id,'automatic',true,'reason','CALENDAR_DATE') FROM candidates RETURNING id
+      )
+      INSERT INTO audit_logs(id,actor_user_id,entity_type,entity_id,action,old_value,new_value)
+      SELECT 'audit_'||substr(replace(gen_random_uuid()::text,'-',''),1,8),actor_id,'CLIENT',client_id,'STATUS_AUTO_CHANGED',jsonb_build_object('statusId',old_status_id),jsonb_build_object('statusId',new_status_id) FROM candidates
+    `);
     const result = await this.db.query(`
       WITH candidates AS (
         SELECT t.id trial_id,t.client_id,c.name,
@@ -247,8 +271,8 @@ class PostgresStorage {
           GROUP BY c.id HAVING c.total_deal_amount-COALESCE(sum(p.amount),0)>0
         )
     `,[userId]);
-    if(result.rowCount||unassigned.rowCount||balances.rowCount||resolvedBalances.rowCount)this.invalidateStateCache();
-    return result.rowCount+unassigned.rowCount+balances.rowCount+resolvedBalances.rowCount;
+    if(statusChanges.rowCount||result.rowCount||unassigned.rowCount||balances.rowCount||resolvedBalances.rowCount)this.invalidateStateCache();
+    return statusChanges.rowCount+result.rowCount+unassigned.rowCount+balances.rowCount+resolvedBalances.rowCount;
   }
 
   async registerClientAndBookTrial(input) {
