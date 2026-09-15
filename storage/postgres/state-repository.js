@@ -84,9 +84,9 @@ class PostgresStateRepository {
     }, { ...row, active:value(row,"active",true), isSystem:Boolean(row.isSystem), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });
 
     const references = [
-      ["statuses", state.statuses, { id:"id", name:"name", color:"color", sort_order:"sortOrder", action_type:"actionType", required_fields:"requiredFields", partial_payment:"partialPayment", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
-      ["lead_sources", state.leadSources, { id:"id", name:"name", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
-      ["tags", state.tags, { id:"id", name:"name", color:"color", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
+      ["statuses", state.statuses, { id:"id", name:"name", color:"color", sort_order:"sortOrder", action_type:"actionType", required_fields:"requiredFields", partial_payment:"partialPayment", system_key:"systemKey", deleted_at:"deletedAt", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
+      ["lead_sources", state.leadSources, { id:"id", name:"name", sort_order:"sortOrder", deleted_at:"deletedAt", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
+      ["tags", state.tags, { id:"id", name:"name", color:"color", sort_order:"sortOrder", deleted_at:"deletedAt", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["refusal_reasons", state.refusalReasons, { id:"id", name:"name", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["payment_methods", state.paymentMethods, { id:"id", name:"name", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
     ];

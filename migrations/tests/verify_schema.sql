@@ -22,8 +22,8 @@ BEGIN
   END IF;
 
   SELECT count(*) INTO permission_count FROM public.permissions;
-  IF permission_count <> 44 THEN
-    RAISE EXCEPTION 'Expected 44 permission definitions, found %', permission_count;
+  IF permission_count <> 45 THEN
+    RAISE EXCEPTION 'Expected 45 permission definitions, found %', permission_count;
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '001')
@@ -34,8 +34,9 @@ BEGIN
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '006')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '007')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '008')
-    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '009') THEN
-    RAISE EXCEPTION 'Expected schema migration versions 001 through 009';
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '009')
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '010') THEN
+    RAISE EXCEPTION 'Expected schema migration versions 001 through 010';
   END IF;
 END;
 $$;

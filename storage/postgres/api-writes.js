@@ -124,6 +124,7 @@ function isHandledRoute(method, pathname) {
   return (method === "POST" && /^\/api\/clients\/[^/]+\/(archive|restore|notes|reassign|status)$/.test(pathname))
     || (method === "POST" && /^\/api\/trials\/[^/]+\/(assign|reassign)$/.test(pathname))
     || (method === "DELETE" && /^\/api\/clients\/[^/]+$/.test(pathname))
+    || (method === "DELETE" && /^\/api\/payments\/[^/]+$/.test(pathname))
     || (method === "POST" && /^\/api\/payments\/[^/]+\/correct$/.test(pathname))
     || (method === "POST" && /^\/api\/notifications\/[^/]+\/(read|snooze)$/.test(pathname));
 }
@@ -201,7 +202,8 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           if (!name || phone.length < 12 || (!unassigned&&(!input.closerId || !input.slotId))) throw new HttpError(422, unassigned?"Укажите имя и корректный телефон":"Укажите имя, корректный телефон, клоузера и свободное время");
           const closer = unassigned?null:await tx.users.findById(input.closerId);
           if (!unassigned&&(!closer?.active || closer.role !== "CLOSER")) throw new HttpError(422, "Выберите активного клоузера");
-          const statusId = input.statusId || (await tx.db.query("SELECT id FROM statuses WHERE active ORDER BY sort_order,id LIMIT 1")).rows[0]?.id;
+          const preferredDate=input.preferredDate||null,businessToday=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Almaty"}).format(new Date()),operationalKey=preferredDate===businessToday?"TODAY":"PLANNED";
+          const statusId = (await tx.db.query("SELECT id FROM statuses WHERE system_key=$1 AND deleted_at IS NULL LIMIT 1",[operationalKey])).rows[0]?.id || input.statusId || (await tx.db.query("SELECT id FROM statuses WHERE active AND deleted_at IS NULL ORDER BY sort_order,id LIMIT 1")).rows[0]?.id;
           const managerId = actor.role === "MANAGER" ? actor.id : input.managerId;
           const duplicate = await tx.clients.findByNormalizedPhone(phone);
           if (duplicate) throw new HttpError(409, duplicate.archivedAt ? "Клиент с таким номером находится в архиве" : "Клиент с таким номером телефона уже существует", { code:"DUPLICATE_PHONE", clientId: duplicate.id, archived: Boolean(duplicate.archivedAt) });
@@ -340,6 +342,16 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
           const replacement = await tx.correctPayment({ paymentId: payment.id, replacementPaymentId: makeId("pay"), correctionId: makeId("pcorr"), historyId: makeId("hist"), auditId: makeId("audit"), actorUserId: actor.id, amount, paymentMethodId: input.paymentMethodId, paymentDate: input.paymentDate, comment: input.comment || "", reason: String(input.reason || "") });
           const correctedAt=now();await tx.db.query("UPDATE clients SET updated_at=$2 WHERE id=$1",[client.id,correctedAt]);const balance=(await tx.db.query("SELECT c.total_deal_amount-COALESCE(sum(p.amount) FILTER(WHERE p.voided_at IS NULL),0) remaining FROM clients c LEFT JOIN payments p ON p.client_id=c.id WHERE c.id=$1 GROUP BY c.id",[client.id])).rows[0]?.remaining;if(balance!==null&&Number(balance)<=0)await tx.db.query("UPDATE notifications SET resolved_at=$2,snoozed_until=NULL,updated_at=$2 WHERE client_id=$1 AND type='PREPAYMENT_BALANCE_DUE' AND resolved_at IS NULL",[client.id,correctedAt]);
           return { status: 201, body: replacement };
+        }
+
+        const deletion = url.pathname.match(/^\/api\/payments\/([^/]+)$/);
+        if (req.method==="DELETE"&&deletion) {
+          requirePermission(actor,"payments.delete");
+          const payment=await tx.payments.findActiveById(deletion[1],{forUpdate:true});if(!payment)throw new HttpError(404,"Активная оплата не найдена");
+          const client=await lockClient(tx,payment.clientId);if(client.archivedAt)throw new HttpError(409,"Оплаты архивного клиента доступны только для просмотра");if(!(await clientMatchesScope(tx,actor,client,"payments")))throw new HttpError(403,"Оплата вне вашей области данных");if(input.confirmed!==true)throw new HttpError(422,"Подтвердите удаление оплаты");
+          const deletedAt=now(),snapshot={id:payment.id,clientId:payment.clientId,amount:Number(payment.amount),paymentMethodId:payment.paymentMethodId,paymentDate:payment.paymentDate,comment:payment.comment};
+          await tx.payments.void(payment.id,deletedAt);await tx.db.query("UPDATE clients SET updated_at=$2 WHERE id=$1",[client.id,deletedAt]);await appendHistory(tx,client.id,actor.id,"PAYMENT_DELETED",snapshot,{voidedAt:deletedAt},deletedAt);await tx.auditLogs.append({id:makeId("audit"),actorUserId:actor.id,entityType:"PAYMENT",entityId:payment.id,action:"PAYMENT_DELETED",oldValue:snapshot,newValue:{voidedAt:deletedAt},createdAt:deletedAt});
+          return{status:200,body:{id:payment.id,deleted:true,voidedAt:deletedAt}};
         }
 
         const notification = url.pathname.match(/^\/api\/notifications\/([^/]+)\/read$/);

@@ -14,6 +14,7 @@ These migrations support the PostgreSQL HTTP backend. They do not import
 7. `007_closer_availability_management.sql` adds an optional per-Closer trial duration with a backward-compatible null/default fallback.
 8. `008_trial_operations.sql` adds the current card reason, pending-reschedule lineage, and durable notification snooze/resolution fields without rewriting existing rows.
 9. `009_prepayment_and_client_timestamps.sql` adds configurable partial-payment behavior, deal metadata, an exact status-change timestamp, and a deduplicated balance-reminder index without rewriting existing rows.
+10. `010_operational_statuses_and_safe_reference_delete.sql` gives Today/Planned statuses stable system keys, adds non-destructive reference tombstones, and introduces the separately grantable payment-delete permission.
 10. `tests/verify_schema.sql` validates the catalog and exercises critical constraints inside a transaction that is always rolled back.
 
 ## Application requirements for the future cutover
