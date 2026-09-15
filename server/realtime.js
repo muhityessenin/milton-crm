@@ -3,13 +3,14 @@
 const crypto = require("node:crypto");
 
 const RESOURCE_RULES = [
-  [/^\/api\/clients(?:\/|$)/, ["clients", "trials", "schedule", "notifications", "analytics"]],
+  [/^\/api\/clients(?:\/|$)/, ["clients", "trials", "schedule", "notifications", "analytics", "finance"]],
   [/^\/api\/slots(?:\/|$)/, ["schedule"]],
-  [/^\/api\/payments(?:\/|$)/, ["payments", "clients", "notifications", "analytics"]],
+  [/^\/api\/payments(?:\/|$)/, ["payments", "clients", "notifications", "analytics", "finance"]],
   [/^\/api\/notifications(?:\/|$)/, ["notifications"]],
-  [/^\/api\/admin\/config(?:\/|$)/, ["references", "clients", "schedule", "analytics"]],
-  [/^\/api\/trials(?:\/|$)/, ["trials","clients","schedule","notifications","analytics"]],
-  [/^\/api\/admin\/(?:branding|users|roles)(?:\/|$)/, ["settings", "users", "clients", "schedule"]],
+  [/^\/api\/admin\/config(?:\/|$)/, ["references", "clients", "schedule", "analytics", "finance"]],
+  [/^\/api\/trials(?:\/|$)/, ["trials","clients","schedule","notifications","analytics","finance"]],
+  [/^\/api\/admin\/(?:branding|users|roles)(?:\/|$)/, ["settings", "users", "clients", "schedule", "finance"]],
+  [/^\/api\/(?:finance|admin\/teams|admin\/finance-settings|admin\/payment-methods)(?:\/|$)/, ["finance","users","settings","references"]],
   [/^\/api\/profile$/, ["profile", "users"]],
 ];
 

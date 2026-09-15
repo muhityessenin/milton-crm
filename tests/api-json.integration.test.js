@@ -51,6 +51,10 @@ test("full HTTP API preserves CRM behavior through JSON storage", async (t) => {
   result = await call("GET", "/api/bootstrap");
   assert.equal(result.response.status, 200);
   assert.equal(result.response.headers.get("content-encoding"),"gzip");
+  assert.equal(result.body.access.permissions["finance.companyTurnover"],true);
+  assert.equal(Array.isArray(result.body.teams),true);
+  result=await call("GET","/api/finance?from=2026-09-01&to=2026-09-30");assert.equal(result.response.status,200);assert.equal(typeof result.body.summary.salary,"number");
+  result=await call("GET","/api/export/finance.csv?from=2026-09-01&to=2026-09-30");assert.equal(result.response.status,200);assert.match(result.body,/Gross/);
   result=await call("GET","/api/sync?resources=notifications");assert.equal(result.response.status,200);assert.ok(Array.isArray(result.body.notifications));assert.equal("clients" in result.body,false);
   result = await call("GET", "/api/bootstrap");
   const slot = result.body.dashboard ? (await call("GET", "/api/slots?closerId=usr_closer")).body.find((item) => item.status === "FREE") : null;

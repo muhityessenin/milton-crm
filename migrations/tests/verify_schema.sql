@@ -12,8 +12,10 @@ BEGIN
     'client_tags', 'clients', 'lead_sources', 'notes', 'notifications',
     'payment_corrections', 'payment_methods', 'payments', 'permissions',
     'refusal_reasons', 'role_permissions', 'role_scopes', 'roles',
-    'saved_filters', 'schema_migrations', 'sessions', 'statuses', 'tags',
-    'trials', 'user_permission_overrides', 'user_scope_overrides', 'users'
+    'saved_filters', 'schema_migrations', 'sessions', 'statuses', 'tags', 'teams',
+    'trials', 'user_permission_overrides', 'user_scope_overrides', 'users',
+    'employee_compensation_history', 'payment_method_commission_history',
+    'finance_trial_bonus_statuses'
   ]) AS expected(table_name)
   WHERE to_regclass('public.' || expected.table_name) IS NULL;
 
@@ -22,8 +24,8 @@ BEGIN
   END IF;
 
   SELECT count(*) INTO permission_count FROM public.permissions;
-  IF permission_count <> 45 THEN
-    RAISE EXCEPTION 'Expected 45 permission definitions, found %', permission_count;
+  IF permission_count <> 56 THEN
+    RAISE EXCEPTION 'Expected 56 permission definitions, found %', permission_count;
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '001')
@@ -35,8 +37,9 @@ BEGIN
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '007')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '008')
     OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '009')
-    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '010') THEN
-    RAISE EXCEPTION 'Expected schema migration versions 001 through 010';
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '010')
+    OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version = '011') THEN
+    RAISE EXCEPTION 'Expected schema migration versions 001 through 011';
   END IF;
 END;
 $$;
@@ -110,6 +113,10 @@ BEGIN
 
   IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='notifications_user_client_balance_uidx') THEN
     RAISE EXCEPTION 'Missing durable prepayment reminder index';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='statuses' AND column_name='is_refund') THEN
+    RAISE EXCEPTION 'Missing additive refund-status marker';
   END IF;
 END;
 $$;

@@ -15,6 +15,7 @@ These migrations support the PostgreSQL HTTP backend. They do not import
 8. `008_trial_operations.sql` adds the current card reason, pending-reschedule lineage, and durable notification snooze/resolution fields without rewriting existing rows.
 9. `009_prepayment_and_client_timestamps.sql` adds configurable partial-payment behavior, deal metadata, an exact status-change timestamp, and a deduplicated balance-reminder index without rewriting existing rows.
 10. `010_operational_statuses_and_safe_reference_delete.sql` gives Today/Planned statuses stable system keys, adds non-destructive reference tombstones, and introduces the separately grantable payment-delete permission.
+11. `011_finance_salary.sql` adds teams, historical employee and bank rates, Finance permissions, refund marking, and trial-bonus status configuration.
 10. `tests/verify_schema.sql` validates the catalog and exercises critical constraints inside a transaction that is always rolled back.
 
 ## Application requirements for the future cutover
