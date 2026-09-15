@@ -51,6 +51,10 @@ class PostgresStateRepository {
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.notifications x) notifications,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.audit_logs x) audit_logs,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.saved_filters x) saved_filters,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.created_at,x.id),'[]') FROM public.teams x) teams,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.effective_at,x.id),'[]') FROM public.employee_compensation_history x) employee_compensation_history,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.effective_at,x.id),'[]') FROM public.payment_method_commission_history x) payment_method_commission_history,
+        (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.configured_at,x.status_id),'[]') FROM public.finance_trial_bonus_statuses x) finance_trial_bonus_statuses,
         (SELECT to_jsonb(x) FROM public.app_settings x WHERE id='global') settings
     `);
     const raw=result.rows[0],mapped=(items,mapper=camelRow)=>(items||[]).map(mapper);
@@ -58,13 +62,14 @@ class PostgresStateRepository {
     const availabilitySlots=mapped(raw.availability_slots),payments=mapped(raw.payments,mapPayment),paymentCorrections=mapped(raw.payment_corrections);
     const statuses=mapped(raw.statuses),leadSources=mapped(raw.lead_sources),tags=mapped(raw.tags),refusalReasons=mapped(raw.refusal_reasons),paymentMethods=mapped(raw.payment_methods);
     const notes=mapped(raw.notes),history=mapped(raw.history),notifications=mapped(raw.notifications),auditLogs=mapped(raw.audit_logs),savedFilters=mapped(raw.saved_filters);
+    const teams=mapped(raw.teams),employeeCompensationHistory=mapped(raw.employee_compensation_history),paymentMethodCommissionHistory=mapped(raw.payment_method_commission_history),financeTrialBonusStatuses=mapped(raw.finance_trial_bonus_statuses);
     const settingsRow=camelRow(raw.settings);
     const settings=settingsRow?{version:settingsRow.schemaVersion,timezone:settingsRow.timezone,branding:{companyName:settingsRow.companyName,accentColor:settingsRow.accentColor,logoUrl:settingsRow.logoUrl},reminderMinutes:settingsRow.reminderMinutes,unassignedTrialReminderMinutes:settingsRow.unassignedTrialReminderMinutes??120,createdAt:settingsRow.createdAt,updatedAt:settingsRow.updatedAt}:null;
     return {
       meta: settings || { version: 1, timezone: "Asia/Almaty", branding: { companyName: "Milton", accentColor: "#3157D5", logoUrl: "" }, reminderMinutes: 30 },
       users, roles, clients, trials, availabilitySlots, payments, paymentCorrections,
       statuses, leadSources, tags, refusalReasons, paymentMethods, notes, history,
-      notifications, auditLogs, savedFilters,
+      notifications, auditLogs, savedFilters, teams, employeeCompensationHistory, paymentMethodCommissionHistory, financeTrialBonusStatuses,
     };
   }
 
@@ -76,7 +81,7 @@ class PostgresStateRepository {
       return (fullState[name]||[]).filter((row)=>previous.get(row.id)!==JSON.stringify(row));
     };
     state={...fullState};
-    for(const name of ["roles","users","clients","trials","availabilitySlots","payments","paymentCorrections","statuses","leadSources","tags","refusalReasons","paymentMethods","notes","history","notifications","auditLogs","savedFilters"])state[name]=changed(name);
+    for(const name of ["roles","users","clients","trials","availabilitySlots","payments","paymentCorrections","statuses","leadSources","tags","refusalReasons","paymentMethods","notes","history","notifications","auditLogs","savedFilters","teams","employeeCompensationHistory","paymentMethodCommissionHistory"])state[name]=changed(name);
     const now = stamp();
     for (const row of state.roles) await upsert(this.db, "roles", {
       id:"id", name:"name", system_key:"systemKey", base_role:"baseRole", is_system:"isSystem",
@@ -84,7 +89,7 @@ class PostgresStateRepository {
     }, { ...row, active:value(row,"active",true), isSystem:Boolean(row.isSystem), createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now) });
 
     const references = [
-      ["statuses", state.statuses, { id:"id", name:"name", color:"color", sort_order:"sortOrder", action_type:"actionType", required_fields:"requiredFields", partial_payment:"partialPayment", system_key:"systemKey", deleted_at:"deletedAt", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
+      ["statuses", state.statuses, { id:"id", name:"name", color:"color", sort_order:"sortOrder", action_type:"actionType", required_fields:"requiredFields", partial_payment:"partialPayment", system_key:"systemKey", is_refund:"isRefund", deleted_at:"deletedAt", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["lead_sources", state.leadSources, { id:"id", name:"name", sort_order:"sortOrder", deleted_at:"deletedAt", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["tags", state.tags, { id:"id", name:"name", color:"color", sort_order:"sortOrder", deleted_at:"deletedAt", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
       ["refusal_reasons", state.refusalReasons, { id:"id", name:"name", sort_order:"sortOrder", active:"active", archived_at:"archivedAt", created_at:"createdAt", updated_at:"updatedAt" }],
@@ -95,6 +100,10 @@ class PostgresStateRepository {
       actionType:value(row,"actionType","NONE"), requiredFields:value(row,"requiredFields",[]), partialPayment:value(row,"partialPayment",false), active:value(row,"active",true),
       createdAt:value(row,"createdAt",now), updatedAt:value(row,"updatedAt",now), archivedAt:value(row,"archivedAt",null),
     });
+
+    for(const row of state.teams)await upsert(this.db,"teams",{id:"id",name:"name",created_by_user_id:"createdByUserId",created_at:"createdAt",updated_at:"updatedAt"},{...row,createdAt:value(row,"createdAt",now),updatedAt:value(row,"updatedAt",now)});
+    for(const row of state.employeeCompensationHistory)await upsert(this.db,"employee_compensation_history",{id:"id",user_id:"userId",sales_commission_percent:"salesCommissionPercent",conducted_trial_amount:"conductedTrialAmount",effective_at:"effectiveAt",changed_by_user_id:"changedByUserId",created_at:"createdAt"},{...row,createdAt:value(row,"createdAt",now)});
+    for(const row of state.paymentMethodCommissionHistory)await upsert(this.db,"payment_method_commission_history",{id:"id",payment_method_id:"paymentMethodId",bank_commission_percent:"bankCommissionPercent",effective_at:"effectiveAt",changed_by_user_id:"changedByUserId",created_at:"createdAt"},{...row,createdAt:value(row,"createdAt",now)});
 
     for (const row of state.users) await upsert(this.db, "users", {
       id:"id", name:"name", login:"login", password_hash:"passwordHash", role_id:"roleId", business_role:"role",
@@ -174,6 +183,10 @@ class PostgresStateRepository {
       const scopeRows=state.users.flatMap((user)=>Object.entries(user.scopeOverrides||{}).map(([resource,scope])=>[user.id,resource,scope]));
       if(scopeRows.length)await this.db.query("INSERT INTO public.user_scope_overrides(user_id,resource,scope) SELECT * FROM unnest($1::text[],$2::text[],$3::text[])",[scopeRows.map(r=>r[0]),scopeRows.map(r=>r[1]),scopeRows.map(r=>r[2])]);
     }
+    if(!original||JSON.stringify(original.financeTrialBonusStatuses||[])!==JSON.stringify(fullState.financeTrialBonusStatuses||[])){
+      await this.db.query("DELETE FROM public.finance_trial_bonus_statuses");
+      const rows=fullState.financeTrialBonusStatuses||[];if(rows.length)await this.db.query("INSERT INTO public.finance_trial_bonus_statuses(status_id,configured_by_user_id,configured_at) SELECT * FROM unnest($1::text[],$2::text[],$3::timestamptz[])",[rows.map(row=>row.statusId),rows.map(row=>row.configuredByUserId||null),rows.map(row=>row.configuredAt||now)]);
+    }
     const clientsChanged=!original||state.clients.length||(original.clients||[]).length!==fullState.clients.length;
     if(clientsChanged){await this.db.query("DELETE FROM public.client_tags");const tagRows=fullState.clients.flatMap((client)=>(client.tagIds||[]).map((tagId)=>[client.id,tagId]));if(tagRows.length)await this.db.query("INSERT INTO public.client_tags(client_id,tag_id) SELECT * FROM unnest($1::text[],$2::text[])",[tagRows.map(r=>r[0]),tagRows.map(r=>r[1])]);}
 
@@ -181,6 +194,7 @@ class PostgresStateRepository {
       ["payment_corrections","paymentCorrections"], ["notifications","notifications"], ["notes","notes"],
       ["client_history","history"], ["audit_logs","auditLogs"], ["saved_filters","savedFilters"],
       ["payments","payments"], ["trials","trials"], ["clients","clients"], ["availability_slots","availabilitySlots"],
+      ["employee_compensation_history","employeeCompensationHistory"], ["payment_method_commission_history","paymentMethodCommissionHistory"], ["teams","teams"],
       ["users","users"], ["roles","roles"], ["statuses","statuses"], ["lead_sources","leadSources"],
       ["tags","tags"], ["refusal_reasons","refusalReasons"], ["payment_methods","paymentMethods"],
     ];

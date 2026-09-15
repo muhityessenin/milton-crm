@@ -45,6 +45,12 @@ prevent more than one active trial per slot or client.
 - `REQUIRE_RESCHEDULE`: validates a real free slot, releases the old booking, preserves the old trial, and creates the new trial.
 - `REQUIRE_PAYMENT`: validates amount, active payment method, and explicit payment date, then appends a payment with historical attribution.
 
+## Finance and salary
+
+Finance is a derived read model over active payments and completed trials; it does not duplicate accounting records. Payment rows keep their original Manager/Closer attribution, while effective-dated employee rates and payment-method bank commissions preserve the conditions that applied to each operation. A deal with a positive `totalDealAmount` accrues no employee commission until active, non-voided payments cover the full amount. Conducted-trial bonuses use configured qualifying statuses and one immutable trial result, so one trial can contribute at most one bonus.
+
+Current team membership limits who team leaders can view, but never rewrites historical attribution. Company totals, detailed payment rows, client finance history, and export are separate server-enforced permissions. Refunds are marked through an additive status flag and are never silently deducted from salary.
+
 ## Persistence and production boundary
 
 The production adapter uses PostgreSQL through `pg`; JSON remains available for

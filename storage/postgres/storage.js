@@ -15,6 +15,7 @@ const CHANGE_RESOURCES = {
   user_permission_overrides:["users","settings"], user_scope_overrides:["users","settings"],
   statuses:["references","clients","analytics"], lead_sources:["references","clients","analytics"], tags:["references","clients"],
   refusal_reasons:["references","analytics"], payment_methods:["references","analytics"], app_settings:["settings"],
+  teams:["users","finance"], employee_compensation_history:["users","finance"], payment_method_commission_history:["references","finance"], finance_trial_bonus_statuses:["settings","finance"],
 };
 
 class PostgresStorage {
@@ -64,10 +65,10 @@ class PostgresStorage {
   async assertSchema() {
     const result = await this.db.query(`
       SELECT version FROM public.schema_migrations
-      WHERE version IN ('001', '002', '003', '004', '005', '006', '007', '008', '009', '010') ORDER BY version
+      WHERE version IN ('001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011') ORDER BY version
     `);
-    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007,008,009,010") {
-      throw new Error("Milton PostgreSQL migrations 001 through 010 are required");
+    if (result.rows.map((row) => row.version).join(",") !== "001,002,003,004,005,006,007,008,009,010,011") {
+      throw new Error("Milton PostgreSQL migrations 001 through 011 are required");
     }
   }
 
