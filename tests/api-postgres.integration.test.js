@@ -22,7 +22,7 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   await client.query("BEGIN");
   // This storage shares one outer rollback transaction, so it cannot receive
   // commit-time LISTEN/NOTIFY invalidations. Disable the read cache in this test.
-  const txStorage=new PostgresStorage({pool:ownerStorage.pool,db:client,ownsPool:false,stateCacheTtlMillis:0});
+  const txStorage=new PostgresStorage({pool:ownerStorage.pool,db:client,ownsPool:false,stateCacheTtlMillis:0,notificationRefreshMillis:0});
   t.after(async()=>{
     if(app.server.listening)await new Promise((resolve)=>app.server.close(resolve));
     await client.query("ROLLBACK").catch(()=>{});client.release();await ownerStorage.close();
@@ -137,4 +137,11 @@ test("full HTTP API works through PostgreSQL storage", { skip:!enabled }, async 
   const permissionPayment={statusId:"st_payment",amount:25000,paymentMethodId:"method_1",paymentDate:"2026-09-14"};result=await callAs(closerAdminToken,"POST",`/api/clients/${permissionClientId}/status`,permissionPayment);assert.equal(result.response.status,403);assert.equal(result.body.missingPermission,"payments.create");assert.match(result.body.error,/Оплаты → Создание оплаты.*payments\.create/);
   result=await call("GET",`/api/clients/${permissionClientId}`);assert.equal(result.body.payments.length,0);result=await call("PUT",`/api/admin/roles/${closerAdminRole.id}`,{permissions:{"payments.create":true}});assert.equal(result.response.status,200);
   result=await callAs(closerAdminToken,"POST",`/api/clients/${permissionClientId}/status`,permissionPayment);assert.equal(result.response.status,200);result=await call("GET",`/api/clients/${permissionClientId}`);assert.equal(result.body.payments.length,1);assert.equal(result.body.client.currentStatusId,"st_payment");assert.equal((await call("DELETE",`/api/clients/${permissionClientId}`,{confirmation:"УДАЛИТЬ"})).response.status,200);
+
+  const closerRoleId=state.users.find((row)=>row.id==="usr_closer").roleId;
+  await client.query("INSERT INTO users(id,name,login,password_hash,role_id,business_role) VALUES('api_reassign_closer','Reassign Closer',$1,'hash',$2,'CLOSER')",[`reassign.${loginSuffix}@milton.test`,closerRoleId]);
+  await client.query("INSERT INTO availability_slots(id,closer_id,start_at,end_at,status) VALUES('api_reassign_old_slot','usr_closer','2032-01-15T05:00:00Z','2032-01-15T06:00:00Z','FREE'),('api_reassign_new_slot','api_reassign_closer','2032-01-16T05:00:00Z','2032-01-16T06:00:00Z','FREE')");
+  result=await call("POST","/api/clients",{name:"Closer reassignment regression",phone:"+77015556637",managerId:"usr_manager",closerId:"usr_closer",slotId:"api_reassign_old_slot",statusId:"st_scheduled",trialType:"FREE"});assert.equal(result.response.status,201);const reassignClientId=result.body.id;
+  result=await call("POST",`/api/clients/${reassignClientId}/reassign`,{closerId:"api_reassign_closer",newSlotId:"api_reassign_new_slot"});assert.equal(result.response.status,200);assert.equal(result.body.currentCloserId,"api_reassign_closer");
+  result=await call("GET",`/api/clients/${reassignClientId}`);assert.equal(result.body.client.activeTrial.closerId,"api_reassign_closer");assert.equal((await call("DELETE",`/api/clients/${reassignClientId}`,{confirmation:"УДАЛИТЬ"})).response.status,200);
 });

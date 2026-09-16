@@ -223,7 +223,7 @@ function normalizePhone(input = "") {
 function publicAvatarUrl(u){return u?.avatarUrl?`/api/users/${encodeURIComponent(u.id)}/avatar?v=${encodeURIComponent(u.updatedAt||"")}`:"";}
 function publicUser(u) { if(!u)return null; const { passwordHash, permissionOverrides, scopeOverrides, ...safe } = u; return {...safe,avatarUrl:publicAvatarUrl(u)}; }
 function adminUserView(u) { if(!u)return null; const { passwordHash, ...safe } = u; return {...safe,avatarUrl:publicAvatarUrl(u)}; }
-function publicBranding(){const value=db.meta.branding||{};return{...value,logoUrl:value.logoUrl?`/api/branding/logo?v=${crypto.createHash("sha1").update(value.logoUrl).digest("hex").slice(0,12)}`:""};}
+function publicBranding(){const value=db.meta.branding||{};return{...value,logoUrl:value.logoUrl?`/api/branding/logo?v=${encodeURIComponent(db.meta.updatedAt||db.meta.version||"")}`:""};}
 function imageData(value){const match=String(value||"").match(/^data:(image\/(?:png|jpeg|webp|svg\+xml));base64,([\s\S]+)$/);if(!match)return null;try{return{type:match[1],buffer:Buffer.from(match[2],"base64")};}catch{return null;}}
 function sendImage(req,res,value){const image=imageData(value);if(!image)return fail(res,404,"Изображение не найдено");const etag=`\"${crypto.createHash("sha1").update(image.buffer).digest("hex")}\"`;if(req.headers["if-none-match"]===etag){res.writeHead(304,{ETag:etag,"Cache-Control":"private, max-age=31536000, immutable"});return res.end();}res.writeHead(200,{"Content-Type":image.type,"Content-Length":String(image.buffer.length),"Cache-Control":"private, max-age=31536000, immutable",ETag:etag,"X-Content-Type-Options":"nosniff","Content-Security-Policy":"default-src 'none'; style-src 'unsafe-inline'; img-src data:"});if(req.method==="HEAD")return res.end();return res.end(image.buffer);}
 function requestMemo(key,build){const context=requestState.getStore();if(!context)return build();context.memo||=new Map();if(!context.memo.has(key))context.memo.set(key,build());return context.memo.get(key);}
@@ -485,9 +485,13 @@ async function api(req, res, url) {
   if (["GET","HEAD"].includes(req.method) && /^\/api\/users\/[^/]+\/avatar$/.test(url.pathname)) {
     const target=user(url.pathname.split("/")[3]);
     if(!target||(!target.active&&!hasPermission(actor,"users.view")))return fail(res,404,"Изображение не найдено");
-    return sendImage(req,res,target.avatarUrl);
+    const avatarData=activeStorage() instanceof PostgresStorage?await activeStorage().users.avatarData(target.id):target.avatarUrl;
+    return sendImage(req,res,avatarData);
   }
-  if (["GET","HEAD"].includes(req.method) && url.pathname==="/api/branding/logo") return sendImage(req,res,db.meta.branding?.logoUrl);
+  if (["GET","HEAD"].includes(req.method) && url.pathname==="/api/branding/logo") {
+    const logoData=activeStorage() instanceof PostgresStorage?await activeStorage().settings.logoData():db.meta.branding?.logoUrl;
+    return sendImage(req,res,logoData);
+  }
   if (req.method === "GET" && /^\/api\/trials\/[^/]+\/receipt$/.test(url.pathname)) {
     const trialId=url.pathname.split("/")[3],trial=db.trials.find((item)=>item.id===trialId),c=trial&&client(trial.clientId);
     if(!trial||!c||!canOpenClient(actor,c)||!hasPermission(actor,"clients.viewHistory")||!trial.receiptStorageKey)return fail(res,404,"Чек не найден");
@@ -630,7 +634,12 @@ async function api(req, res, url) {
   if (req.method === "POST" && /^\/api\/admin\/users\/[^/]+\/restore$/.test(url.pathname)) { if(!requirePermission(res,actor,"users.archive"))return;const uid=url.pathname.split("/")[4],target=user(uid);if(!target)return fail(res,404,"Пользователь не найден");if(!db.roles.some((role)=>role.id===target.roleId&&role.active))return fail(res,422,"Перед восстановлением назначьте активную роль");const oldValue={active:target.active,archivedAt:target.archivedAt};target.active=true;target.archivedAt=null;target.updatedAt=now();audit(actor.id,"USER",target.id,"USER_RESTORED",oldValue,{active:true});saveDb();return json(res,200,publicUser(target)); }
   if (req.method === "POST" && /^\/api\/notifications\/[^/]+\/read$/.test(url.pathname)) {const target=db.notifications.find((n)=>n.id===url.pathname.split("/")[3]&&n.userId===actor.id);if(!target)return fail(res,404,"Уведомление не найдено");target.readAt=target.readAt||now();saveDb();return json(res,200,target);}
   if (req.method === "POST" && /^\/api\/notifications\/[^/]+\/snooze$/.test(url.pathname)) {const target=db.notifications.find((n)=>n.id===url.pathname.split("/")[3]&&n.userId===actor.id&&!n.resolvedAt);if(!target)return fail(res,404,"Активное уведомление не найдено");target.snoozedUntil=new Date(Date.now()+15*60000).toISOString();target.updatedAt=now();saveDb();return json(res,200,target);}
-  if (req.method === "GET" && url.pathname === "/api/audit") { if(!requirePermission(res,actor,"audit.view"))return;return json(res,200,db.auditLogs.slice().reverse().map((entry)=>({...entry,actor:publicUser(user(entry.actorUserId))}))); }
+  if (req.method === "GET" && url.pathname === "/api/audit") {
+    if(!requirePermission(res,actor,"audit.view"))return;
+    const requested=Number(url.searchParams.get("limit")||200),limit=Number.isInteger(requested)?Math.min(500,Math.max(1,requested)):200;
+    const entries=activeStorage() instanceof PostgresStorage?await activeStorage().auditLogs.recent(limit):db.auditLogs.slice(-limit).reverse();
+    return json(res,200,entries.map((entry)=>({...entry,actor:publicUser(user(entry.actorUserId))})));
+  }
   if(req.method==="GET"&&url.pathname==="/api/schedule-board"){
     if(!requirePermission(res,actor,"schedule.view"))return;
     const date=/^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get("date")||"")?url.searchParams.get("date"):dayKey(now());

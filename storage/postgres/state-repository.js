@@ -22,10 +22,19 @@ async function removeMissing(db, table, ids) {
 class PostgresStateRepository {
   constructor(storage) { this.storage = storage; this.db = storage.db; }
 
-  async load() {
+  async load({ includeAuditLogs = true, includeMedia = true } = {}) {
+    const userJson=includeMedia
+      ? "to_jsonb(x)"
+      : "(to_jsonb(x) - 'avatar_url') || jsonb_build_object('avatar_url', CASE WHEN COALESCE(x.avatar_url,'')='' THEN '' ELSE '__stored__' END)";
+    const settingsJson=includeMedia
+      ? "to_jsonb(x)"
+      : "(to_jsonb(x) - 'logo_url') || jsonb_build_object('logo_url', CASE WHEN COALESCE(x.logo_url,'')='' THEN '' ELSE '__stored__' END)";
+    const auditJson=includeAuditLogs
+      ? "(SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.audit_logs x)"
+      : "'[]'::jsonb";
     const result=await this.db.query(`
       SELECT
-        (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.created_at,x.id),'[]') FROM (
+        (SELECT COALESCE(jsonb_agg(${userJson} ORDER BY x.created_at,x.id),'[]') FROM (
           SELECT u.*,
             COALESCE((SELECT jsonb_object_agg(permission_key,enabled) FROM public.user_permission_overrides WHERE user_id=u.id),'{}') permission_overrides,
             COALESCE((SELECT jsonb_object_agg(resource,scope) FROM public.user_scope_overrides WHERE user_id=u.id),'{}') scope_overrides
@@ -49,13 +58,13 @@ class PostgresStateRepository {
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.notes x) notes,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.client_history x) history,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.notifications x) notifications,
-        (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.audit_logs x) audit_logs,
+        ${auditJson} audit_logs,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.id),'[]') FROM public.saved_filters x) saved_filters,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.created_at,x.id),'[]') FROM public.teams x) teams,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.effective_at,x.id),'[]') FROM public.employee_compensation_history x) employee_compensation_history,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.effective_at,x.id),'[]') FROM public.payment_method_commission_history x) payment_method_commission_history,
         (SELECT COALESCE(jsonb_agg(to_jsonb(x) ORDER BY x.configured_at,x.status_id),'[]') FROM public.finance_trial_bonus_statuses x) finance_trial_bonus_statuses,
-        (SELECT to_jsonb(x) FROM public.app_settings x WHERE id='global') settings
+        (SELECT ${settingsJson} FROM public.app_settings x WHERE id='global') settings
     `);
     const raw=result.rows[0],mapped=(items,mapper=camelRow)=>(items||[]).map(mapper);
     const users=mapped(raw.users,mapUser),roles=mapped(raw.roles),clients=mapped(raw.clients),trials=mapped(raw.trials);

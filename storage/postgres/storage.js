@@ -30,6 +30,8 @@ class PostgresStorage {
     this.stateWriteQueue = Promise.resolve();
     this.changeListener = null;
     this.changeListenerTimer = null;
+    this.changeListenerFlushTimer = null;
+    this.changeListenerResources = new Set();
     this.changeListenerStopped = false;
     Object.assign(this, createRepositories(db));
     this.state = new PostgresStateRepository(this);
@@ -78,12 +80,22 @@ class PostgresStorage {
     const client = new Client(this.pool.options);
     try { await client.connect(); }
     catch (error) { await client.end().catch(()=>{}); throw error; }
+    const flush = () => {
+      this.changeListenerFlushTimer=null;
+      const resources=[...this.changeListenerResources];
+      this.changeListenerResources.clear();
+      this.invalidateStateCache();
+      onChange(resources.length?resources:["bootstrap"]);
+    };
     const handle = (message) => {
       try {
         const payload = JSON.parse(message.payload || "{}");
-        this.invalidateStateCache();
-        onChange(CHANGE_RESOURCES[payload.table] || ["bootstrap"]);
-      } catch { onChange(["bootstrap"]); }
+        for(const resource of CHANGE_RESOURCES[payload.table]||["bootstrap"])this.changeListenerResources.add(resource);
+      } catch { this.changeListenerResources.add("bootstrap"); }
+      if(!this.changeListenerFlushTimer){
+        this.changeListenerFlushTimer=setTimeout(flush,10);
+        this.changeListenerFlushTimer.unref?.();
+      }
     };
     const reconnect = (error) => {
       if(error)console.error(`PostgreSQL realtime listener error: ${error.code || error.message}`);
@@ -105,6 +117,7 @@ class PostgresStorage {
 
   async stopChangeListener() {
     this.changeListenerStopped=true;clearTimeout(this.changeListenerTimer);this.changeListenerTimer=null;
+    clearTimeout(this.changeListenerFlushTimer);this.changeListenerFlushTimer=null;this.changeListenerResources.clear();
     this.stateCache.changeFeedReady=false;
     if (!this.changeListener) return;
     const { client, handle } = this.changeListener;
@@ -151,18 +164,24 @@ class PostgresStorage {
         : null;
       if (!state) {
         if (!this.stateCache.pending) {
-          this.stateCache.pendingRevision=this.stateCache.revision||0;
-          this.stateCache.pending = this.transaction((tx) => tx.state.load(), { invalidateCache: false });
+          this.stateCache.pending=(async()=>{
+            // A single business operation can emit many table notifications.
+            // Let the short listener batch settle before starting the expensive snapshot.
+            if(this.stateCache.changeFeedReady&&(this.stateCache.revision||0)>0)await new Promise((resolve)=>setTimeout(resolve,15));
+            const revision=this.stateCache.revision||0;
+            const value=await this.transaction((tx)=>tx.state.load({includeAuditLogs:false,includeMedia:false}),{invalidateCache:false});
+            return{value,revision};
+          })();
         }
-        const pending=this.stateCache.pending,pendingRevision=this.stateCache.pendingRevision;
+        const pending=this.stateCache.pending;
         try {
-          state = await pending;
-          if (pendingRevision===(this.stateCache.revision||0)&&this.stateCacheTtlMillis > 0) {
+          const loaded=await pending;state=loaded.value;
+          if (loaded.revision===(this.stateCache.revision||0)&&this.stateCacheTtlMillis > 0) {
             this.stateCache.value = state;
             this.stateCache.expiresAt = Date.now() + this.stateCacheTtlMillis;
           }
         } finally {
-          if(this.stateCache.pending===pending){this.stateCache.pending=null;this.stateCache.pendingRevision=null;}
+          if(this.stateCache.pending===pending)this.stateCache.pending=null;
         }
       }
       const result = await work(state, this);
@@ -171,7 +190,7 @@ class PostgresStorage {
     }
     const execute = () => this.transaction(async (tx) => {
       await tx.db.query("SELECT pg_advisory_xact_lock(hashtext('milton_crm_api_state'))");
-      const state = await tx.state.load();
+      const state = await tx.state.load({includeAuditLogs:true,includeMedia:true});
       const original = structuredClone(state);
       const result = await work(state, tx);
       if (result?.dirty) await tx.state.save(state, original);

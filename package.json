@@ -12,7 +12,7 @@
     "test:performance": "node --test tests/performance-contract.test.js",
     "test:postgres": "RUN_POSTGRES_TESTS=1 node --test tests/postgres-repositories.integration.test.js",
     "test:postgres-api": "RUN_POSTGRES_API_TESTS=1 node --test tests/api-postgres.integration.test.js",
-    "test:postgres:all": "RUN_POSTGRES_TESTS=1 RUN_POSTGRES_API_TESTS=1 node --test --test-concurrency=1 tests/postgres-repositories.integration.test.js tests/api-postgres.integration.test.js",
+    "test:postgres:all": "RUN_POSTGRES_TESTS=1 RUN_POSTGRES_API_TESTS=1 node --test --test-concurrency=1 tests/postgres-repositories.integration.test.js tests/postgres-optimization.integration.test.js tests/api-postgres.integration.test.js",
     "seed:postgres": "node scripts/seed-postgres.js",
     "seed:postgres:apply": "node scripts/seed-postgres.js --apply",
     "e2e:postgres": "node scripts/e2e-postgres.js",

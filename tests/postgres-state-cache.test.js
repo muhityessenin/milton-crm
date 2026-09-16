@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { PostgresStorage } = require("../storage/postgres/storage");
+const { PostgresStateRepository } = require("../storage/postgres/state-repository");
 
 test("PostgreSQL read model cache coalesces concurrent reads and invalidates explicitly", async () => {
   const storage = new PostgresStorage({
@@ -49,4 +50,18 @@ test("operational notification refreshes are coalesced and briefly throttled per
   assert.equal(queries,5);
   assert.equal(await storage.ensureOperationalNotificationsFor("user-1"),0);
   assert.equal(queries,5);
+});
+
+test("PostgreSQL read snapshots exclude audit and inline media by default",async()=>{
+  const queries=[];
+  const empty={users:[],roles:[],clients:[],trials:[],availability_slots:[],payments:[],payment_corrections:[],statuses:[],lead_sources:[],tags:[],refusal_reasons:[],payment_methods:[],notes:[],history:[],notifications:[],audit_logs:[],saved_filters:[],teams:[],employee_compensation_history:[],payment_method_commission_history:[],finance_trial_bonus_statuses:[],settings:null};
+  const repository=new PostgresStateRepository({db:{query:async(sql)=>{queries.push(sql);return{rows:[empty]};}}});
+  const light=await repository.load({includeAuditLogs:false,includeMedia:false});
+  assert.deepEqual(light.auditLogs,[]);
+  assert.doesNotMatch(queries[0],/FROM public\.audit_logs/);
+  assert.match(queries[0],/__stored__/);
+  queries.length=0;
+  await repository.load();
+  assert.match(queries[0],/FROM public\.audit_logs/);
+  assert.doesNotMatch(queries[0],/__stored__/);
 });

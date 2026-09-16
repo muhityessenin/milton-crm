@@ -58,6 +58,10 @@ class UsersRepository extends SqlRepository {
     const result = await this.db.query(`${this.baseSelect()} WHERE lower(u.login) = lower($1)`, [login]);
     return result.rowCount ? mapUser(result.rows[0]) : null;
   }
+  async avatarData(id) {
+    const result=await this.db.query("SELECT avatar_url FROM public.users WHERE id=$1",[id]);
+    return result.rowCount?result.rows[0].avatar_url||"":"";
+  }
   async create(value) {
     const result = await this.db.query(`
       INSERT INTO public.users (
@@ -500,6 +504,10 @@ class SettingsRepository extends SqlRepository {
       createdAt: value.createdAt,
       updatedAt: value.updatedAt,
     };
+  }
+  async logoData() {
+    const result=await this.db.query("SELECT logo_url FROM public.app_settings WHERE id='global'");
+    return result.rowCount?result.rows[0].logo_url||"":"";
   }
 }
 

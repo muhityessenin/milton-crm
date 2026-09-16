@@ -58,6 +58,14 @@ local demos. Critical writes use repositories, row locks, constraints, and
 database transactions. Legacy read endpoints still consume an API-shaped read
 model. PostgreSQL read models are cached briefly to coalesce bursts, but future
 large datasets should move list/search/analytics endpoints to paginated SQL.
+The hot read model deliberately excludes audit rows and inline avatar/logo
+bytes. Audit is fetched as a bounded, newest-first query and media is fetched
+by its dedicated authenticated endpoint. Full state (including those fields)
+is loaded only for the legacy state-write path, preserving write semantics
+without moving multi-megabyte values through PostgreSQL on every cache miss.
+Commit-time table notifications are batched before invalidating the read model,
+so one business transaction produces one refresh instead of one refresh per
+changed table.
 
 Production runs the app and PostgreSQL as separate containers on one private
 Docker network. PostgreSQL uses a persistent volume and must not publish port

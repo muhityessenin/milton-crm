@@ -284,7 +284,10 @@ function createPostgresWriteHandler({ storage, readBody, sendJson, normalizePhon
               if (activeTrial) {
                 const newSlot = await tx.availabilitySlots.lockById(input.newSlotId);
                 if (!newSlot || newSlot.closerId !== closer.id || newSlot.status !== "FREE") throw new HttpError(409, "Для нового клоузера выберите свободное время");
-                await tx.trials.finish(activeTrial.id, { resultAt: now(), resultActorUserId: actor.id, attendanceOutcome: "RESCHEDULED" });
+                // A technical closer reassignment is recorded in history/audit below, but
+                // is not a CRM result status. Keep result fields empty to satisfy the trial
+                // result invariant while closing the old scheduled event.
+                await tx.trials.finish(activeTrial.id, { attendanceOutcome: "RESCHEDULED" });
                 const trial = await tx.trials.create({ id: makeId("trial"), clientId, closerId: closer.id, managerId, slotId: newSlot.id, scheduledAt: newSlot.startAt, statusAtBookingId: client.currentStatusId, active: true });
                 await appendHistory(tx, clientId, actor.id, "TRIAL_RESCHEDULED", { trialId: activeTrial.id, scheduledAt: activeTrial.scheduledAt, closerId: activeTrial.closerId }, { trialId: trial.id, scheduledAt: trial.scheduledAt, closerId: closer.id });
               }
