@@ -637,7 +637,8 @@ async function api(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/audit") {
     if(!requirePermission(res,actor,"audit.view"))return;
     const requested=Number(url.searchParams.get("limit")||200),limit=Number.isInteger(requested)?Math.min(500,Math.max(1,requested)):200;
-    const entries=activeStorage() instanceof PostgresStorage?await activeStorage().auditLogs.recent(limit):db.auditLogs.slice(-limit).reverse();
+    const requestedOffset=Number(url.searchParams.get("offset")||0),offset=Number.isSafeInteger(requestedOffset)?Math.min(100000,Math.max(0,requestedOffset)):0;
+    const entries=activeStorage() instanceof PostgresStorage?await activeStorage().auditLogs.recent(limit,offset):db.auditLogs.slice().reverse().slice(offset,offset+limit);
     return json(res,200,entries.map((entry)=>({...entry,actor:publicUser(user(entry.actorUserId))})));
   }
   if(req.method==="GET"&&url.pathname==="/api/schedule-board"){

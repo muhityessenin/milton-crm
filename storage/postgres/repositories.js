@@ -435,7 +435,7 @@ class AuditLogsRepository extends SqlRepository {
     `, [value.id, value.actorUserId || null, value.entityType, value.entityId, value.action, value.oldValue ?? null, value.newValue ?? null, value.createdAt || null]);
     return camelRow(result.rows[0]);
   }
-  async recent(limit = 100) { return rows(await this.db.query("SELECT * FROM public.audit_logs ORDER BY created_at DESC LIMIT $1", [limit])); }
+  async recent(limit = 100,offset = 0) { return rows(await this.db.query("SELECT * FROM public.audit_logs ORDER BY created_at DESC,id DESC LIMIT $1 OFFSET $2", [limit,offset])); }
 }
 
 class SessionsRepository extends SqlRepository {
